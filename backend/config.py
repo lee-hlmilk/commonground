@@ -3,7 +3,22 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(dotenv_path=None, override=False, **kwargs):
+        if not dotenv_path or not Path(dotenv_path).exists():
+            return False
+        for raw_line in Path(dotenv_path).read_text(encoding='utf-8').splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, val = line.split('=', 1)
+            key = key.strip()
+            val = val.strip().strip('"').strip("'")
+            if override or key not in os.environ:
+                os.environ[key] = val
+        return True
 
 ROOT = Path(__file__).resolve().parent.parent
 # The user explicitly configures this local prototype via .env. Prefer it to

@@ -16,9 +16,39 @@ from pydantic import BaseModel, Field, model_validator
 from .config import ROOT, Settings
 from .coordination import Coordinator
 from .data import DataRepository
+from .handover import (
+    COMMIT_MIN_MARGIN,
+    COMMIT_MIN_TOP_PROB,
+    MENUS,
+    WAKE_GAP_TABLE,
+    HandoverScenarioCatalog,
+    apply_controller_decision,
+    evaluate_handover_batch,
+    prune_turn1_menus,
+    run_handover_negotiation,
+)
 from .scenarios import ScenarioRepository
 from .solver import validate_plan
 from .store import RunStore, now
+
+
+class HandoverRunInput(BaseModel):
+    incident_id: str = 'story-weather-agreement'
+    mode: Literal['dev', 'jev', 'claude', 'jev_claude_cascade', 'fallback'] = 'dev'
+    force_situation: Literal['DESTINATION_WEATHER', 'LATE_INBOUND'] | None = None
+    assumptions_override: dict | None = None
+
+
+class HandoverDecisionInput(BaseModel):
+    action: Literal['accept', 'accept_refusal', 'accept_divert', 'override']
+    override_actions: dict[Literal['atc', 'pilot', 'ground'], str] | None = None
+    note: str | None = None
+
+
+class HandoverBatchEvalInput(BaseModel):
+    model_off_limit: int = Field(default=50, ge=1, le=500)
+    model_on_limit: int = Field(default=20, ge=1, le=200)
+    model_on_mode: Literal['dev', 'jev', 'claude', 'jev_claude_cascade'] = 'dev'
 
 
 class RunInput(BaseModel):
@@ -65,13 +95,14 @@ def create_app(settings=None, repository=None):
             DataRepository, ROOT, settings.database_path(),
             {name: os.getenv(name.upper() + '_CSV', './' + name + '.csv') for name in ('flights', 'airports', 'airlines')})
         app.state.scenarios = ScenarioRepository(app.state.data)
+        app.state.handover = HandoverScenarioCatalog(app.state.data)
         app.state.custom = {}
         app.state.store = RunStore(settings.database_path())
         app.state.custom.update({s['id']: s for s in app.state.store.scenarios()})
         app.state.coordinator = Coordinator(app.state.store, settings)
         # Rehydrate custom scenarios from persisted runs after restart.
         for run in app.state.store.list():
-            if run['scenario']['id'].startswith('custom-'):
+            if 'scenario' in run and run['scenario']['id'].startswith('custom-'):
                 app.state.custom.setdefault(run['scenario']['id'], run['scenario'])
         yield
         tasks = list(app.state.coordinator.tasks.values())
@@ -157,7 +188,110 @@ def create_app(settings=None, repository=None):
     @app.get('/api/runs')
     def runs():
         return dict(runs=[dict(id=r['id'], status=r['status'], mode=r['mode'], created_at=r['created_at'],
-                               name=r['scenario']['name'], consensus=r['consensus']) for r in app.state.store.list()])
+                               name=r['scenario']['name'], consensus=r['consensus'])
+                          for r in app.state.store.list() if 'scenario' in r])
+
+    @app.get('/api/handover/presets')
+    def handover_presets():
+        return dict(
+            presets=app.state.handover.list_presets(),
+            menus=MENUS,
+            wake_gap_table=WAKE_GAP_TABLE,
+            dominance_thresholds=dict(
+                min_top_probability=COMMIT_MIN_TOP_PROB,
+                min_margin_over_runner_up=COMMIT_MIN_MARGIN,
+            ),
+        )
+
+    @app.get('/api/handover/incidents/{incident_id}')
+    def handover_incident(incident_id: str, force_situation: str | None = None):
+        try:
+            inc = app.state.handover.get_incident(incident_id, force_situation=force_situation)
+        except KeyError:
+            raise HTTPException(404, 'Incident preset or flight record not found.')
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        t1_menus, t1_removed = prune_turn1_menus(inc)
+        return dict(incident=inc, turn1_remaining_menus=t1_menus, turn1_removed_actions=t1_removed)
+
+    @app.get('/api/handover/runs')
+    def handover_runs():
+        return dict(runs=[
+            dict(
+                id=r['id'],
+                status=r['status'],
+                outcome_type=r.get('outcome_type'),
+                mode=r['mode'],
+                turns_used=r.get('turns_used'),
+                created_at=r['created_at'],
+                incident_id=r['incident']['id'],
+                name=r['incident']['name'],
+                summary_banner=r.get('summary_banner'),
+            )
+            for r in app.state.store.list()
+            if r.get('kind') == 'handover'
+        ])
+
+    @app.post('/api/handover/runs')
+    async def start_handover_run(body: HandoverRunInput):
+        try:
+            inc = app.state.handover.get_incident(body.incident_id, force_situation=body.force_situation)
+            if body.assumptions_override:
+                inc = app.state.handover.apply_overrides(inc, body.assumptions_override)
+        except KeyError:
+            raise HTTPException(404, 'Incident preset or flight record not found.')
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+
+        if body.mode in ('jev', 'jev_claude_cascade') and not settings.jev_api_key.strip():
+            raise HTTPException(
+                400,
+                'Add JEV_API_KEY (or TYPESAFE_API_KEY) to .env for live Jev mode, or use mode="dev" / mode="fallback" to simulate now.',
+            )
+        if body.mode == 'claude' and not settings.api_key.strip():
+            raise HTTPException(
+                400,
+                'Add ANTHROPIC_API_KEY to .env for live Claude mode, or use mode="dev" / mode="fallback" to simulate now.',
+            )
+
+        result = await run_handover_negotiation(inc, settings, mode=body.mode)
+        result['kind'] = 'handover'
+        app.state.store.save(result)
+        return result
+
+    @app.get('/api/handover/runs/{run_id}')
+    def get_handover_run(run_id: str):
+        r = get_run(run_id)
+        if r.get('kind') != 'handover':
+            raise HTTPException(404, 'Handover run not found.')
+        return r
+
+    @app.post('/api/handover/runs/{run_id}/decision')
+    def decide_handover_run(run_id: str, body: HandoverDecisionInput):
+        r = get_run(run_id)
+        if r.get('kind') != 'handover':
+            raise HTTPException(404, 'Handover run not found.')
+        try:
+            updated = apply_controller_decision(
+                r,
+                decision_action=body.action,
+                override_actions=body.override_actions,
+                controller_note=body.note,
+            )
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(422, str(exc))
+        app.state.store.save(updated)
+        return updated
+
+    @app.post('/api/handover/evaluate')
+    async def run_handover_evaluation(body: HandoverBatchEvalInput):
+        return await evaluate_handover_batch(
+            app.state.handover,
+            settings,
+            model_off_limit=body.model_off_limit,
+            model_on_limit=body.model_on_limit,
+            model_on_mode=body.model_on_mode,
+        )
 
     @app.post('/api/runs')
     async def start_run(body: RunInput):
