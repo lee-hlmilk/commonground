@@ -88,9 +88,12 @@ pre { font-family: var(--code); font-size: 11px; line-height: 1.5; background: r
 .view-tabs button { display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 8px; border: none; background: none; color: var(--muted); font-size: 13px; font-weight: 550; }
 .view-tabs button.active { background: rgba(90, 169, 255, 0.16); color: var(--text); box-shadow: inset 0 0 0 1px rgba(90, 169, 255, 0.35); }
 .run-controls { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
-.select { position: relative; min-width: 0; }
-.select select { appearance: none; height: 34px; padding: 0 30px 0 12px; border-radius: 9px; border: 1px solid var(--line-strong); background: rgba(0, 0, 0, 0.3); font-size: 13px; max-width: 280px; text-overflow: ellipsis; }
-.select.small select { max-width: 170px; color: var(--muted); }
+.brand, .view-tabs, .top-right, .run-controls > .btn { flex-shrink: 0; }
+.view-tabs button { white-space: nowrap; }
+.select { position: relative; min-width: 0; flex: 1 1 280px; }
+.select.small { flex-basis: 170px; }
+.select select { display: block; appearance: none; width: 100%; min-width: 0; height: 34px; padding: 0 30px 0 12px; border-radius: 9px; border: 1px solid var(--line-strong); background: rgba(0, 0, 0, 0.3); font-size: 13px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.select.small select { color: var(--muted); }
 .select svg { position: absolute; right: 10px; top: 10px; pointer-events: none; color: var(--muted); }
 .select option { background: #0b1424; }
 .top-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
@@ -573,6 +576,15 @@ pre { font-family: var(--code); font-size: 11px; line-height: 1.5; background: r
 @keyframes rise { from { opacity: 0; transform: translateY(10px) scale(0.985); } to { opacity: 1; transform: none; } }
 .ops-panel, .globe-panel { animation: rise 0.5s var(--ease); }
 
+/* Give the run controls their own row before the desktop header gets crowded. */
+@media (min-width: 901px) and (max-width: 1500px) {
+  .view-ops .topbar { height: 98px; flex-wrap: wrap; gap: 8px 14px; padding: 8px 12px; }
+  .view-ops .run-controls { order: 3; flex-basis: 100%; }
+  .view-ops .ops-panel, .view-ops .panel-tab { top: 124px; }
+  .view-ops .scene-head { top: 126px; }
+  .view-ops .toast { top: 122px; }
+}
+
 /* Narrow screens: stack the HUD beneath the scene. */
 @media (max-width: 1180px) {
   .ops-panel.left { width: 320px; }
@@ -580,16 +592,14 @@ pre { font-family: var(--code); font-size: 11px; line-height: 1.5; background: r
   .scene-head { left: 344px; right: 354px; }
   .scenario-title p, .legend-chips { display: none; }
   .flight-card { right: 354px; }
-  .select select { max-width: 200px; }
-  .select.small { display: none; }
 }
 @media (max-width: 900px) {
   body { overflow: auto; }
   .app { height: auto; min-height: 100vh; overflow: visible; }
   .topbar { position: relative; top: 0; left: 0; right: 0; margin: 8px; height: auto; flex-wrap: wrap; padding: 8px; gap: 8px; }
-  .run-controls { order: 3; flex-basis: 100%; flex-wrap: wrap; }
-  .select select { max-width: 100%; }
-  .top-right { margin-left: auto; }
+  .view-tabs { order: 2; }
+  .run-controls { order: 3; flex-basis: 100%; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .top-right { order: 1; margin-left: auto; }
   .key-state { display: none; }
   .stage { position: relative; inset: auto; display: flex; flex-direction: column; gap: 10px; padding: 0 8px 16px; }
   .scenes { position: relative; inset: auto; height: 56vh; margin: 0 8px 10px; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--line); }
