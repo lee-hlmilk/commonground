@@ -1,124 +1,223 @@
-import { useEffect, useRef, useState } from 'react';
-import { ArrowDownToLine, ArrowRight, Check, CheckCircle2, ChevronDown, ChevronRight, Clock3, Database, FileText, GitBranch, Headphones, Info, Layers3, Loader2, MessageSquare, Plane, Play, Radio, RefreshCw, ShieldCheck, SlidersHorizontal, Users, X, Zap } from 'lucide-react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ArrowDownToLine, ArrowRight, ChevronDown, FileText, Globe2, Info, LayoutGrid, Loader2, Play, RefreshCw, X } from 'lucide-react';
 import { api } from './api';
-import type { Check as ConstraintCheck, Flight, Health, Message, Participant, Run, Scenario, ScenarioSummary } from './types';
+import type { Flight, Health, Message, Network, Participant, Run, Scenario, ScenarioSummary } from './types';
+import { FLIGHT_COLORS, TYPE_COLORS } from './lib/format';
+import { horizonOf } from './lib/sim';
+import { simClock } from './lib/clock';
+import { AirportPanel, GlobeOverview } from './components/GlobePanels';
+import { CommsPanel, DecisionPanel, FlightCard, type ViewPlan } from './components/OpsPanels';
+import Timeline from './components/Timeline';
+import { Evidence } from './components/Evidence';
+import type { Beam, CameraPreset } from './airport/AirportScene';
 
-const STATUS: Record<string, string> = {negotiating:'Coordinating',awaiting_approval:'Your decision needed',approved:'Plan approved',rejected:'Plan rejected',fallback:'Fallback available',unresolved:'Human review needed',interrupted:'Coordination interrupted'};
-const ROLE: Record<string,string> = {atc:'Air traffic control',pilot:'Flight captain',ground:'Ground operations'};
-const COLORS = ['#237e83','#b67643','#756aad','#5581a3','#a35465'];
+const GlobeScene = lazy(() => import('./globe/GlobeScene'));
+const AirportScene = lazy(() => import('./airport/AirportScene'));
 
-function time(clock:string, minutes:number) { const [h,m] = clock.split(':').map(Number); const value = h*60+m+minutes; return `${String(Math.floor(((value%1440)+1440)%1440/60)).padStart(2,'0')}:${String(((value%60)+60)%60).padStart(2,'0')}${value>=1440?' +1d':''}`; }
-function histTime(value:unknown) { if(value === undefined || value === null || value==='')return '—'; const s=String(value).padStart(4,'0'); return s.length===4?`${s.slice(0,2)}:${s.slice(2)}`:String(value); }
-function json(value:unknown) {return JSON.stringify(value,null,2);}
+type SavedRun = {id: string; name: string; created_at: string; mode: string; status: string};
 
 export default function App() {
-  const [scenarios,setScenarios]=useState<ScenarioSummary[]>([]);
-  const [selected,setSelected]=useState('atl-three-flight-clash');
-  const [loaded,setLoaded]=useState<Scenario|null>(null);
-  const [run,setRun]=useState<Run|null>(null);
-  const [health,setHealth]=useState<Health|null>(null);
-  const [summary,setSummary]=useState<Record<string,unknown>|null>(null);
-  const [savedRuns,setSavedRuns]=useState<{id:string;name:string;created_at:string;mode:string;status:string}[]>([]);
-  const [replaySource,setReplaySource]=useState('');
-  const [error,setError]=useState('');
-  const [busy,setBusy]=useState(false);
-  const [view,setView]=useState<'recovery'|'historical'>('recovery');
-  const [tab,setTab]=useState<'conversation'|'checks'>('conversation');
-  const [drawer,setDrawer]=useState<'evidence'|'data'|null>(null);
-  const [evidence,setEvidence]=useState<Flight|null>(null);
-  const [stand,setStand]=useState('');
-  const scenario=run?.scenario ?? loaded;
-  const sourceRef=useRef<EventSource|null>(null);
+  const [view, setView] = useState<'globe' | 'ops'>('globe');
+  const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
+  const [selected, setSelected] = useState('atl-three-flight-clash');
+  const [loaded, setLoaded] = useState<Scenario | null>(null);
+  const [run, setRun] = useState<Run | null>(null);
+  const [health, setHealth] = useState<Health | null>(null);
+  const [summary, setSummary] = useState<Record<string, unknown> | null>(null);
+  const [network, setNetwork] = useState<Network | null>(null);
+  const [savedRuns, setSavedRuns] = useState<SavedRun[]>([]);
+  const [replaySource, setReplaySource] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [airport, setAirport] = useState<string | null>(null);
+  const [routeLimit, setRouteLimit] = useState(700);
+  const [weatherOnly, setWeatherOnly] = useState(false);
+  const [selectedFlight, setSelectedFlight] = useState<string | null>(null);
+  const [stand, setStand] = useState('');
+  const [viewPlan, setViewPlan] = useState<ViewPlan>({kind: 'proposal'});
+  const [beams, setBeams] = useState<Beam[]>([]);
+  const [left, setLeft] = useState(true);
+  const [right, setRight] = useState(true);
+  const [preset, setPreset] = useState<{name: CameraPreset; nonce: number}>({name: 'overview', nonce: 0});
+  const [drawer, setDrawer] = useState<{flight: Flight | null} | null>(null);
+  const [narrow, setNarrow] = useState(() => window.innerWidth <= 900);
+  const sourceRef = useRef<EventSource | null>(null);
+  const seen = useRef(new Set<string>());
+  const timers = useRef<number[]>([]);
 
-  useEffect(()=>{
-    Promise.all([api<{scenarios:ScenarioSummary[]}>('/scenarios'),api<Health>('/health'),api<Record<string,unknown>>('/data/summary')]).then(([list,h,s])=>{setScenarios(list.scenarios);setHealth(h);setSummary(s);}).catch(e=>setError(e.message));
-    return ()=>sourceRef.current?.close();
-  },[]);
-  useEffect(()=>{
-    let active=true;
-    setLoaded(null);setRun(null);sourceRef.current?.close();setError('');
-    api<Scenario>(`/scenarios/${encodeURIComponent(selected)}`).then(s=>{if(active){setLoaded(s);setStand(s.resources.stands[0]?.id??'');}}).catch(e=>{if(active)setError(e.message);});
-    return ()=>{active=false;};
-  },[selected]);
-  useEffect(()=>{
-    if(!run?.id)return;
-    const source=new EventSource(`/api/runs/${run.id}/events`);
-    sourceRef.current=source;
-    source.addEventListener('update',e=>{try{const next=JSON.parse((e as MessageEvent).data);setRun(next);}catch{/* next event can recover */}});
-    return ()=>source.close();
-  },[run?.id]);
+  const scenario = run?.scenario ?? loaded;
+  const recorded = run?.mode === 'recorded_replay';
+  const active = run?.status === 'negotiating';
+  const providerName = health?.provider_label ?? (health?.provider === 'jev' ? 'Jev' : 'Claude');
+  const providerConfigured = health?.provider_configured ?? health?.claude_configured ?? false;
+  const providerKey = health?.provider === 'jev' ? 'JEV_API_KEY or TYPESAFE_API_KEY' : 'ANTHROPIC_API_KEY';
 
-  async function action(fn:()=>Promise<void>) {setBusy(true);setError('');try{await fn();}catch(e){setError(e instanceof Error?e.message:String(e));}finally{setBusy(false);}}
-  function start(mode:string) {if(!scenario)return;void action(async()=>{const next=await api<Run>('/runs',{scenario_id:selected,mode,...(mode==='replay'&&replaySource?{replay_source_id:replaySource}:{})});setRun(next);setView('recovery');});}
-  function decision(value:'approve'|'reject') {if(!run?.proposal)return;void action(async()=>setRun(await api<Run>(`/runs/${run.id}/decision`,{proposal_id:run.proposal!.id,scenario_version:run.scenario.version,decision:value})));}
-  function disruption(body:unknown) {if(!run)return;void action(async()=>setRun(await api<Run>(`/runs/${run.id}/disruptions`,body)));}
-  function inspect(flight:Flight|null=null) {setEvidence(flight);setDrawer('evidence');}
-  const participants=run?.participants??(scenario?[{id:'atc',name:'Tower coordination',role:'atc'},...scenario.flights.map(f=>({id:`pilot-${f.id}`,name:f.callsign,role:'pilot',flight_id:f.id})),{id:'ground',name:'Turnaround coordinator',role:'ground'}]:[]);
-  const checks:ConstraintCheck[]=run?.proposal?.checks?.length?run.proposal.checks:run?.checks??[];
-  const messages=run?.messages??[];
-  const active=run?.status==='negotiating';
-  const recorded=run?.mode==='recorded_replay';
-  const canDecide=!!run?.proposal && !recorded && ['awaiting_approval','fallback'].includes(run.status);
-  const rows=summary?Number(summary.flight_rows??summary.rows??summary.flights):null;
-  const providerName=health?.provider_label??(health?.provider==='jev'?'Jev':'Claude');
-  const providerConfigured=health?.provider_configured??health?.claude_configured??false;
-  const providerKey=health?.provider==='jev'?'JEV_API_KEY or TYPESAFE_API_KEY':'ANTHROPIC_API_KEY';
-  const jevFirst=health?.provider==='jev';
-  useEffect(()=>{api<{runs:{id:string;name:string;created_at:string;mode:string;status:string}[]}>('/runs').then(r=>setSavedRuns(r.runs.filter(r=>r.status!=='negotiating'&&r.mode!=='recorded_replay'))).catch(()=>{});},[run?.id,run?.status]);
+  useEffect(() => {
+    Promise.all([api<{scenarios: ScenarioSummary[]}>('/scenarios'), api<Health>('/health'), api<Record<string, unknown>>('/data/summary')])
+      .then(([list, h, s]) => { setScenarios(list.scenarios); setHealth(h); setSummary(s); }).catch(e => setError(e.message));
+    api<Network>('/network?limit=5000').then(setNetwork).catch(e => setError(`Route network unavailable: ${e.message}`));
+    const resize = () => setNarrow(window.innerWidth <= 900);
+    window.addEventListener('resize', resize);
+    return () => { sourceRef.current?.close(); timers.current.forEach(clearTimeout); window.removeEventListener('resize', resize); };
+  }, []);
 
-  return <div className="app-shell">
-    <aside className="sidebar">
-      <a className="brand" href="/" aria-label="Common Ground home"><span className="brand-mark"><GitBranch size={23}/></span><span>common<br/><b>ground.</b></span></a>
-      <div className="sidebar-label">WORKSPACE</div>
-      <button className="nav-item selected" onClick={()=>setDrawer(null)}><Layers3 size={18}/> Recovery room <span className="nav-dot"/></button>
-      <button className="nav-item" onClick={()=>setDrawer('data')}><Database size={18}/> Flight records</button>
-      <button className="nav-item" onClick={()=>inspect()}><FileText size={18}/> Evidence & assumptions</button>
-      <div className="sidebar-note"><Radio size={20}/><p>Independent voices.<br/><strong>One shared plan.</strong></p><span>Coordination that makes room for people, limits, and better decisions.</span></div>
-      <div className="sidebar-footer"><span className={`connection-dot ${providerConfigured?'connected':''}`}/><div>{`${providerName} key ${providerConfigured?'configured':'needed'}`}<small>{providerConfigured?'Key present · access checked on live run':'Configure the backend .env'}</small></div></div>
-    </aside>
-    <main className="main">
-      <header className="topbar"><div><span className="breadcrumb">AIRPORT OPERATIONS</span><ChevronRight size={14}/><span>Recovery room</span></div><span className="prototype-tag">AUTONOMOUS SG 2026 <span>PROTOTYPE</span></span></header>
-      <div className="page-content">
-        <div className="page-heading"><div><div className="eyebrow"><span/> SHARED SITUATIONAL AWARENESS</div><h1>A disruption. Every perspective.<br/><span>A way forward, together.</span></h1><p>Make the trade-offs visible. Keep the right people in control.</p></div><button className="button secondary export" disabled={!run} onClick={()=>{if(run)window.open(`/api/runs/${run.id}/export`,'_blank','noopener');}}><ArrowDownToLine size={16}/> Export record</button></div>
-        {error&&<div className="alert error" role="alert"><Info size={18}/><span>{error}</span><button onClick={()=>setError('')} aria-label="Dismiss error"><X size={16}/></button></div>}
-        <section className="scenario-bar" aria-label="Scenario configuration"><div className="scenario-select"><span className="field-label">COORDINATION SCENARIO</span><div className="select-wrap"><select aria-label="Coordination scenario" value={recorded&&run?run.scenario.id:selected} onChange={e=>{setRun(null);setSelected(e.target.value);}} disabled={busy||active}>{scenarios.length?scenarios.map(s=><option value={s.id} key={s.id}>{s.name}</option>):<option value={selected}>Loading scenario…</option>}</select><ChevronDown size={16}/></div></div><div className="scenario-meta"><span><Plane size={15}/>{scenario?.flights.length??'—'} aircraft</span><span><Users size={15}/>{participants.length} participants</span><span><Clock3 size={15}/>{scenario?.date??'2015 historical records'}</span></div><div className="run-actions"><select className="replay-select" aria-label="Replay source" value={replaySource} onChange={e=>setReplaySource(e.target.value)} disabled={busy||active}><option value="">Authored illustration</option>{savedRuns.map(r=><option value={r.id} key={r.id}>{r.name} · {r.mode} · {new Date(r.created_at).toLocaleTimeString()}</option>)}</select><button className="button secondary" disabled={busy||active||!scenario} onClick={()=>start('replay')} title="Replay a labelled, authored illustration; no Claude calls"><RefreshCw size={15}/> {replaySource?'Recorded replay':'Illustrative replay'}</button><button className="button primary" disabled={busy||active||!scenario||!providerConfigured} onClick={()=>start('live')} title={!providerConfigured?`Add ${providerKey} to the backend .env to run live coordination`:`Start independent ${providerName} participants`}>{busy||active?<Loader2 size={16} className="spin"/>:<Play size={15} fill="currentColor"/>}{active?'Coordinating…':'Coordinate live'}</button></div></section>
-        {!providerConfigured&&<div className="setup-note"><Info size={14}/><span>Live coordination needs a {providerName} API key in the backend <code>.env</code> ({providerKey}). Explore the illustrative replay or deterministic fallback while setting up.</span></div>}
-        {jevFirst&&<div className="provider-policy"><GitBranch size={14}/><span><strong>Jev first · Claude on low confidence.</strong> Jev evaluates typed options; uncertain decisions are handed to Claude. Operational checks and your approval remain required.</span><span className={`fallback-key-status ${health?.fallback_configured?'ready':''}`}>{health?.fallback_configured?'Claude fallback configured':'Claude fallback key needed'}</span></div>}
-        {jevFirst&&health?.fallback_configured===false&&<div className="setup-note"><Info size={14}/><span>Add <code>ANTHROPIC_API_KEY</code> to the backend <code>.env</code> for Claude fallback. Low-confidence Jev decisions require review when fallback is unavailable.</span></div>}
-        {run&&<div className={`run-banner ${run.status}`}><div><span className={`status-dot ${active?'pulse':''}`}/><strong>{STATUS[run.status]??run.status}</strong><span className="run-mode">{run.mode==='live'?(run.provider==='jev'?'LIVE JEV · TYPED DECISIONS':'LIVE CLAUDE'):recorded?'RECORDED REPLAY · READ ONLY':run.mode==='replay'?'ILLUSTRATIVE REPLAY · SCRIPTED':'DETERMINISTIC · NO AI CONSENSUS'}</span></div><span>Episode {run.episode} <span className="separator">/</span> Round {run.round} of 2 <span className="separator">/</span> Version {run.scenario.version}</span></div>}
-        <div className="stats-grid"><Stat label="AIRPORT" value={scenario?.airport.code??'—'} caption={scenario?.airport.name??'Loading airport details'} icon={<Plane size={18}/>}/><Stat label="FLIGHTS TO COORDINATE" value={String(scenario?.flights.length??'—')} caption="Each captain has an independent voice" icon={<Users size={18}/>}/><Stat label="NEGOTIATION LIMIT" value="2 rounds" caption="One response per participant, per round" icon={<MessageSquare size={18}/>}/><Stat label="FINAL AUTHORITY" value="Human review" caption="You approve before the plan is applied" icon={<ShieldCheck size={18}/>}/></div>
-        {!scenario?<div className="loading-card"><Loader2 className="spin"/> Loading operational picture…</div>:<>
-          <section className="panel timeline-panel"><div className="panel-header"><div><span className="eyebrow">THE OPERATIONAL PICTURE</span><h2>{scenario.airport.code} <span className="title-separator">/</span> Arrival & turnaround</h2></div><div className="segmented"><button className={view==='recovery'?'active':''} onClick={()=>setView('recovery')}>Simulated recovery</button><button className={view==='historical'?'active':''} onClick={()=>setView('historical')}>Historical reference</button></div></div>
-            <div className="timeline-caption"><span className={`tiny-tag ${view==='historical'?'historical':''}`}>{view==='historical'?'RECORDED DATA':'SIMULATION'}</span><span>{view==='historical'?'What the supplied flight records report.':'Historical-derived arrival estimates with explicitly simulated operational constraints.'}</span><button onClick={()=>inspect()}>Inspect evidence <ArrowRight size={13}/></button></div>
-            {view==='recovery'?<Timeline scenario={scenario} run={run}/>:<div className="history-table-wrap"><table className="history-table"><thead><tr><th>AIRCRAFT / ROUTE</th><th>SCHEDULED ARRIVAL</th><th>RECORDED LANDING</th><th>GATE ARRIVAL</th><th>WEATHER DELAY</th><th/></tr></thead><tbody>{scenario.flights.map((f,i)=><tr key={f.id}><td><span className="flight-dot" style={{background:COLORS[i%COLORS.length]}}/><b>{f.callsign}</b><small>{f.origin.code} → {f.destination.code}</small></td><td>{histTime(f.historical.scheduled_arrival)}</td><td>{histTime(f.historical.wheels_on)}</td><td>{histTime(f.historical.arrival_time)}</td><td>{String(f.historical.weather_delay??'—')} min</td><td><button className="text-button" onClick={()=>inspect(f)}>Source <ArrowRight size={12}/></button></td></tr>)}</tbody></table></div>}
-            <div className="resource-strip"><span><Radio size={14}/>{scenario.resources.runways.length} simulated runway{scenario.resources.runways.length!==1?'s':''}</span><span><Layers3 size={14}/>{scenario.resources.stands.length} stands</span><span><Users size={14}/>{scenario.resources.handling_teams} handling teams</span><span className="resource-right">Clock starts {scenario.clock_start} · airport-relative time</span></div>
-          </section>
-          <section className="participants-section"><div className="section-title"><h2>The people behind the decisions</h2><span>Independent context. Explicit responsibility.</span></div><div className="participants-grid">{participants.map((p,i)=><ParticipantCard participant={p} index={i} key={p.id} messages={messages} active={!!active}/>)}</div></section>
-          <div className="coordination-grid"><section className="panel conversation-panel"><div className="panel-header"><div className="tab-row"><button className={tab==='conversation'?'active':''} onClick={()=>setTab('conversation')}><MessageSquare size={16}/> Coordination log <span>{messages.length}</span></button><button className={tab==='checks'?'active':''} onClick={()=>setTab('checks')}><ShieldCheck size={16}/> Constraint checks <span>{checks.length}</span></button></div><span className="subtle-label">TRACEABLE BY DESIGN</span></div>
-            {tab==='conversation'?<div className="message-list" aria-live="polite">{messages.length?messages.map(m=>{const p=participants.find(p=>p.id===m.sender);return <article className="message" key={m.id}><div className={`message-avatar ${p?.role??''}`}>{p?.role==='atc'?<Radio size={17}/>:p?.role==='ground'?<Headphones size={17}/>:<Plane size={17}/>}</div><div className="message-content"><div className="message-heading"><strong>{p?.name??m.sender}</strong><span className={`message-type ${m.type.toLowerCase()}`}>{m.type}</span><span className="message-round">Round {m.round}</span></div><p>{m.statement}</p><DecisionDetails message={m}/><div className="message-evidence">{m.recipients?.length>0&&<span>To {m.recipients.map(id=>participants.find(p=>p.id===id)?.name??id).join(', ')}</span>}{m.evidence_refs?.length? <button onClick={()=>inspect()}><FileText size={11}/>{m.evidence_refs.length} evidence reference{m.evidence_refs.length!==1?'s':''}</button>:null}</div></div></article>}):<div className="empty-conversation"><div className="empty-icon"><MessageSquare size={28}/></div><h3>Start with a shared understanding.</h3><p>Each participant will report what they know, explain their limitations, and respond to a concrete plan.</p><button className="text-button" onClick={()=>start('replay')} disabled={busy}>Explore the illustrative replay <ArrowRight size={14}/></button></div>}{active&&<div className="working-line"><Loader2 size={14} className="spin"/> Participants are assessing the current situation…</div>}</div>:<div className="checks-list">{checks.length?checks.map((c,i)=><CheckRow check={c} key={`${c.id}-${i}`}/>):<div className="empty-small"><ShieldCheck size={24}/><p>Checks appear when a candidate plan has been evaluated. No unchecked plan can be approved.</p></div>}</div>}
-          </section><aside className="decision-column"><section className="panel decision-panel"><div className="panel-header"><div><span className="eyebrow">DUTY MANAGER</span><h2>Your decision, with evidence.</h2></div><ShieldCheck size={22}/></div>{run?.proposal?<><div className={`decision-state ${run.consensus?'agreed':''}`}><span className="status-dot"/><strong>{run.consensus?(recorded?'Saved participant agreement':'Participants have agreed'):'No negotiated consensus'}</strong></div><div className="proposal-summary">{run.proposal.assignments.map(a=>{const f=scenario.flights.find(f=>f.id===a.flight_id);return <div key={a.flight_id}><b>{f?.callsign??a.flight_id}</b><span>{time(scenario.clock_start,a.arrival)} arrival</span><strong>{a.stand_id}</strong></div>})}</div><div className="proposal-metrics"><div><b>{run.proposal.metrics.airborne_wait??'—'}<small>min</small></b><span>Simulated added airborne wait</span></div><div><b>{run.proposal.metrics.total_delay??'—'}<small>min</small></b><span>Simulated departure delay vs scenario target</span></div><div><b>{run.proposal.metrics.surface_wait??0}<small>min</small></b><span>Simulated surface waiting</span></div></div><BaselineComparison run={run}/><p className="decision-note">{run.proposal.valid?'The plan passed operational checks. Review the assumptions and trade-offs before applying it.':'This plan has unresolved checks and cannot be applied.'}</p><div className="approval-actions"><button className="button primary" disabled={!canDecide||busy||!run.proposal.valid} onClick={()=>decision('approve')}><Check size={16}/>Approve plan</button><button className="button secondary" disabled={!canDecide||busy} onClick={()=>decision('reject')}>Decline</button></div></>:<div className="empty-decision"><p>A recommendation will appear here after the participants respond.</p><span>Agreement is a commitment to a specific plan. It is never a majority vote.</span></div>}{run?.error&&<p className="inline-error">{run.error}</p>}<button className="fallback-button" disabled={busy||active} onClick={()=>start('fallback')}><GitBranch size={14}/> Evaluate deterministic fallback <ArrowRight size={13}/></button></section>
-              <section className="panel disruption-panel"><div className="compact-heading"><SlidersHorizontal size={17}/><h3>Change the situation</h3><span className="tiny-tag">SIMULATED</span></div><p>New information invalidates affected commitments and starts a new episode.</p><label>Stand availability<select value={stand} onChange={e=>setStand(e.target.value)} aria-label="Stand to make unavailable">{scenario.resources.stands.map(s=><option key={s.id} value={s.id}>{s.id}</option>)}</select></label><button className="button secondary full" disabled={!run||busy||recorded||!stand} onClick={()=>disruption({type:'stand_unavailable',stand_id:stand,available_from:90})}><Zap size={14}/> Block stand until {time(scenario.clock_start,90)}</button><button className="button secondary full" disabled={!run||busy||recorded} onClick={()=>disruption({type:'runway_closure',start:15,end:40})}><Clock3 size={14}/> Extend runway restriction</button>{scenario.approvals.filter(a=>a.status!=='confirmed').map(a=><button key={a.id} className="button secondary full" disabled={!run||busy||recorded} onClick={()=>disruption({type:'approval_update',approval_id:a.id,status:'confirmed'})}><CheckCircle2 size={14}/> Confirm {a.label}</button>)}</section>
-          </aside></div>
-          <footer className="page-footer"><div><Database size={14}/><span>{rows!==null&&Number.isFinite(rows)?rows.toLocaleString():'Loading source count…'} supplied flight records · 2015 disruption-focused subset</span></div><button onClick={()=>inspect()}>Historical facts and simulation assumptions are kept separate <ArrowRight size={13}/></button></footer>
-        </>}
+  useEffect(() => {
+    let live = true;
+    setLoaded(null); setRun(null); sourceRef.current?.close(); setSelectedFlight(null); setPreset(x => ({name: 'overview', nonce: x.nonce + 1}));
+    api<Scenario>(`/scenarios/${encodeURIComponent(selected)}`).then(s => { if (live) { setLoaded(s); setStand(s.resources.stands[0]?.id ?? ''); } }).catch(e => { if (live) setError(e.message); });
+    return () => { live = false; };
+  }, [selected]);
+
+  useEffect(() => {
+    if (!run?.id) return;
+    const source = new EventSource(`/api/runs/${run.id}/events`);
+    sourceRef.current = source;
+    source.addEventListener('update', e => { try { setRun(JSON.parse((e as MessageEvent).data)); } catch { /* the next event can recover */ } });
+    return () => source.close();
+  }, [run?.id]);
+
+  useEffect(() => {
+    api<{runs: SavedRun[]}>('/runs').then(r => setSavedRuns(r.runs.filter(x => x.status !== 'negotiating' && x.mode !== 'recorded_replay'))).catch(() => {});
+  }, [run?.id, run?.status]);
+
+  const participants: Participant[] = useMemo(() => run?.participants ?? (scenario ? [
+    {id: 'atc', name: 'ATC traffic coordinator', role: 'atc'},
+    ...scenario.flights.map(f => ({id: `pilot-${f.id}`, name: `${f.callsign} captain`, role: 'pilot', flight_id: f.id})),
+    {id: 'ground', name: 'Ground turnaround coordinator', role: 'ground'},
+  ] : []), [run?.participants, scenario]);
+
+  const fire = useCallback((messages: Message[], gap: number) => {
+    messages.forEach((m, i) => {
+      timers.current.push(window.setTimeout(() => setBeams(b => [...b.slice(-14), {id: `${m.id}-${performance.now()}`, from: m.sender, to: m.recipients?.length ? m.recipients : ['atc'], color: TYPE_COLORS[m.type] ?? '#5aa9ff'}]), i * gap));
+    });
+  }, []);
+
+  useEffect(() => {
+    const fresh = (run?.messages ?? []).filter(m => !seen.current.has(m.id));
+    fresh.forEach(m => seen.current.add(m.id));
+    if (fresh.length && view === 'ops') fire(fresh, 420);
+  }, [run?.messages, view, fire]);
+
+  const plan = useMemo(() => {
+    if (!run) return null;
+    if (viewPlan.kind === 'baseline') return run.baseline ?? run.proposal;
+    if (viewPlan.kind === 'candidate') return run.candidates.find(c => c.id === viewPlan.id) ?? run.proposal;
+    return run.proposal;
+  }, [run, viewPlan]);
+
+  const horizon = useMemo(() => scenario ? horizonOf(scenario, [run?.proposal, run?.baseline, ...(run?.candidates ?? [])]) : 120, [scenario, run?.proposal, run?.baseline, run?.candidates]);
+  useEffect(() => { simClock.setHorizon(horizon); }, [horizon]);
+  useEffect(() => {
+    simClock.pause();
+    simClock.set(0);
+    if (plan && view === 'ops') simClock.play();
+  }, [plan?.id, scenario?.id, scenario?.version, view]);
+
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (view !== 'ops' || (e.target as HTMLElement)?.closest('input, select, textarea, button')) return;
+      if (e.code === 'Space') { e.preventDefault(); simClock.toggle(); }
+      if (e.key === 'Escape') { setSelectedFlight(null); setDrawer(null); }
+    };
+    window.addEventListener('keydown', key);
+    return () => window.removeEventListener('keydown', key);
+  }, [view]);
+
+  async function action(fn: () => Promise<void>) { setBusy(true); setError(''); try { await fn(); } catch (e) { setError(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); } }
+  function start(mode: string) {
+    if (!scenario) return;
+    void action(async () => {
+      const next = await api<Run>('/runs', {scenario_id: scenario.id, mode, ...(mode === 'replay' && replaySource ? {replay_source_id: replaySource} : {})});
+      seen.current = new Set(); setViewPlan({kind: 'proposal'}); setRun(next); setView('ops');
+    });
+  }
+  const decide = (d: 'approve' | 'reject') => run?.proposal && void action(async () => setRun(await api<Run>(`/runs/${run.id}/decision`, {proposal_id: run.proposal!.id, scenario_version: run.scenario.version, decision: d})));
+  const disrupt = (body: unknown) => run && void action(async () => { setViewPlan({kind: 'proposal'}); setRun(await api<Run>(`/runs/${run.id}/disruptions`, body)); });
+  const openScenario = (id: string) => { setRun(null); setSelected(id); setView('ops'); };
+
+  const highlights = useMemo(() => scenario ? scenario.flights.map((f, i) => ({origin: f.origin.code, destination: f.destination.code, color: FLIGHT_COLORS[i % FLIGHT_COLORS.length], label: f.callsign})) : [], [scenario]);
+  const globeInsets = useMemo(() => narrow ? {left: 0, right: 0, top: 0, bottom: 0} : {left: 360, right: airport ? 400 : 0, top: 66, bottom: 90}, [narrow, airport]);
+  const opsInsets = useMemo(() => narrow ? {left: 0, right: 0, top: 0, bottom: 0} : {left: left ? 384 : 0, right: right ? 392 : 0, top: 180, bottom: 250}, [narrow, left, right]);
+  const lastScenario = useRef<Scenario | null>(null);
+  if (scenario && view === 'ops') lastScenario.current = scenario;
+  const opsScenario = view === 'ops' ? scenario ?? lastScenario.current : lastScenario.current;
+  const flightIndex = scenario && selectedFlight ? scenario.flights.findIndex(f => f.id === selectedFlight) : -1;
+
+  return <div className={`app view-${view}`}>
+    <header className="topbar glass">
+      <a className="brand" href="/" aria-label="Common Ground home"><span className="mark"/><span>common<b>ground</b></span></a>
+      <nav className="view-tabs" aria-label="Views">
+        <button className={view === 'globe' ? 'active' : ''} onClick={() => setView('globe')}><Globe2 size={15}/> Network globe</button>
+        <button className={view === 'ops' ? 'active' : ''} onClick={() => setView('ops')} disabled={!scenario}><LayoutGrid size={15}/> Recovery room</button>
+      </nav>
+      {view === 'ops' && <div className="run-controls">
+        <div className="select"><select aria-label="Coordination scenario" value={recorded && run ? run.scenario.id : selected} onChange={e => { setRun(null); setSelected(e.target.value); }} disabled={busy || active}>
+          {scenarios.length ? scenarios.map(s => <option value={s.id} key={s.id}>{s.name}</option>) : <option value={selected}>Loading…</option>}
+        </select><ChevronDown size={14}/></div>
+        <div className="select small"><select aria-label="Replay source" value={replaySource} onChange={e => setReplaySource(e.target.value)} disabled={busy || active}>
+          <option value="">Authored illustration</option>
+          {savedRuns.map(r => <option value={r.id} key={r.id}>{r.name} · {r.mode} · {new Date(r.created_at).toLocaleTimeString()}</option>)}
+        </select><ChevronDown size={14}/></div>
+        <button className="btn" disabled={busy || active || !scenario} onClick={() => start('replay')} title="Labelled replay; no model calls"><RefreshCw size={14}/>{replaySource ? 'Recorded replay' : 'Illustrative replay'}</button>
+        <button className="btn primary" disabled={busy || active || !scenario || !providerConfigured} onClick={() => start('live')} title={providerConfigured ? `Start independent ${providerName} participants` : `Add ${providerKey} to the backend .env`}>
+          {busy || active ? <Loader2 size={14} className="spin"/> : <Play size={13} fill="currentColor"/>}{active ? 'Coordinating…' : 'Coordinate live'}
+        </button>
+      </div>}
+      <div className="top-right">
+        <span className={`key-state ${providerConfigured ? 'ok' : ''}`} title={providerConfigured ? `${providerName} key present; access is checked on a live run` : `Live coordination needs ${providerKey} in the backend .env. Replay and fallback work now.`}><i/>{providerName} {providerConfigured ? 'ready' : 'key needed'}{health?.provider === 'jev' ? ` · Claude ${health.fallback_configured ? 'fallback ready' : 'fallback off'}` : ''}</span>
+        <button className="icon-btn" onClick={() => setDrawer({flight: null})} aria-label="Evidence & assumptions" title="Evidence & assumptions"><FileText size={16}/></button>
+        <button className="icon-btn" disabled={!run} onClick={() => run && window.open(`/api/runs/${run.id}/export`, '_blank', 'noopener')} aria-label="Export record" title="Export audit record"><ArrowDownToLine size={16}/></button>
       </div>
-    </main>
-    {drawer&&<div className="drawer-backdrop" onMouseDown={()=>setDrawer(null)}><aside className="drawer" role="dialog" aria-modal="true" aria-label={drawer==='data'?'Flight records':'Evidence and assumptions'} onMouseDown={e=>e.stopPropagation()}><div className="drawer-heading"><div><span className="eyebrow">{drawer==='data'?'SOURCE EXPLORER':'CHECK THE EVIDENCE'}</span><h2>{drawer==='data'?'Flight records':evidence?.callsign??'Facts & assumptions'}</h2></div><button className="icon-button" onClick={()=>setDrawer(null)} aria-label="Close panel"><X size={20}/></button></div>{drawer==='data'?<DataExplorer onCreated={s=>{setScenarios(prev=>[...prev,{id:s.id,name:s.name,description:s.description,airport:s.airport,flight_count:s.flights.length}]);setSelected(s.id);setLoaded(s);setDrawer(null);}}/>:<Evidence scenario={scenario} flight={evidence} summary={summary}/>}</aside></div>}
+    </header>
+
+    {error && <div className="toast" role="alert"><Info size={16}/><span>{error}</span><button onClick={() => setError('')} aria-label="Dismiss error"><X size={14}/></button></div>}
+
+    <div className="scenes">
+      <div className={`scene ${view === 'globe' ? 'on' : 'off'}`} aria-hidden={view !== 'globe'}><Suspense fallback={<div className="scene-loading"><Loader2 className="spin"/> Building globe…</div>}>
+        <GlobeScene active={view === 'globe'} network={network} selected={airport} onSelect={setAirport} highlights={highlights} routeLimit={routeLimit} weatherOnly={weatherOnly} insets={globeInsets}/>
+      </Suspense></div>
+      {opsScenario && <div className={`scene ${view === 'ops' ? 'on' : 'off'}`} aria-hidden={view !== 'ops'}><Suspense fallback={<div className="scene-loading"><Loader2 className="spin"/> Building airport…</div>}>
+        <AirportScene active={view === 'ops'} scenario={opsScenario} plan={scenario ? plan : null} beams={beams} onBeamDone={id => setBeams(b => b.filter(x => x.id !== id))}
+          selectedFlight={selectedFlight} onSelectFlight={setSelectedFlight} selectedStand={stand} onSelectStand={setStand} preset={preset.name} presetNonce={preset.nonce} insets={opsInsets}/>
+      </Suspense></div>}
+    </div>
+
+    {view === 'globe' && <main className="stage">
+      <GlobeOverview network={network} summary={summary} routeLimit={routeLimit} onRouteLimit={setRouteLimit} weatherOnly={weatherOnly} onWeatherOnly={setWeatherOnly} onSelect={setAirport} selected={airport}/>
+      {airport && <AirportPanel code={airport} network={network} scenarios={scenarios} onClose={() => setAirport(null)} onOpenScenario={openScenario}
+        onBuilt={s => { setScenarios(p => [...p.filter(x => x.id !== s.id), {id: s.id, name: s.name, description: s.description, airport: s.airport, flight_count: s.flights.length, date: s.date}]); setRun(null); setSelected(s.id); setLoaded(s); setView('ops'); }}/>}
+      <div className="globe-cta">
+        {scenario && <button className="btn primary lg" onClick={() => setView('ops')}>Open {scenario.airport.code} recovery room <span>{scenario.name}</span><ArrowRight size={16}/></button>}
+        <small>Drag to rotate · scroll to zoom · click an airport · highlighted arcs are the scenario’s inbound flights</small>
+      </div>
+    </main>}
+
+    {view === 'ops' && scenario && <main className="stage ops">
+      <div className="scene-head">
+        <div className="scenario-title"><span className="eyebrow">{scenario.airport.code} · {scenario.date} · clock {scenario.clock_start}</span><h1>{scenario.name}</h1><p>{scenario.description}</p></div>
+        <div className="camera-bar" role="group" aria-label="Camera">
+          {(['overview', 'airspace', 'apron', 'runway'] as CameraPreset[]).map(p => <button key={p} className={preset.name === p && !selectedFlight ? 'active' : ''} onClick={() => { setSelectedFlight(null); setPreset(x => ({name: p, nonce: x.nonce + 1})); }}>{p}</button>)}
+          {selectedFlight && <span className="following">following {scenario.flights[flightIndex]?.callsign}</span>}
+        </div>
+        {plan && plan !== run?.proposal && <div className="preview-flag">Previewing {plan.kind === 'fallback' ? 'fixed-rule baseline' : 'an alternative option'} — not the plan awaiting approval <button onClick={() => setViewPlan({kind: 'proposal'})}>Show recommended</button></div>}
+        {!run && <div className="preview-flag info">No coordination run yet — aircraft hold at reference positions. Start an illustrative replay or live coordination.</div>}
+      </div>
+      <div className="legend-chips"><span><i className="c-hold"/>holding / airborne wait</span><span><i className="c-surf"/>surface holding</span><span><i className="c-closed"/>closed / unavailable</span><span><i className="c-free"/>free stand</span><span><i className="c-msg"/>agent transmission</span></div>
+      <CommsPanel run={run} participants={participants} scenario={scenario} viewPlan={viewPlan} onViewPlan={setViewPlan} onReplayBeams={() => run && fire(run.messages, 650)}
+        onBeamMessage={m => fire([m], 0)} onStart={start} busy={busy} collapsed={!left} onToggle={() => setLeft(v => !v)}/>
+      <DecisionPanel run={run} scenario={scenario} viewPlan={viewPlan} onViewPlan={setViewPlan} busy={busy} onDecision={decide} onFallback={() => start('fallback')}
+        onDisrupt={disrupt} stand={stand} onStand={setStand} collapsed={!right} onToggle={() => setRight(v => !v)}/>
+      {selectedFlight && flightIndex >= 0 && <FlightCard flight={scenario.flights[flightIndex]} index={flightIndex} plan={plan} scenario={scenario} onClose={() => setSelectedFlight(null)} onEvidence={() => setDrawer({flight: scenario.flights[flightIndex]})}/>}
+      <Timeline scenario={scenario} plan={plan} horizon={horizon} selectedFlight={selectedFlight} onSelectFlight={setSelectedFlight}/>
+    </main>}
+
+    {view === 'ops' && !scenario && <div className="scene-loading full"><Loader2 className="spin"/> Loading scenario…</div>}
+
+    {drawer && <div className="drawer-backdrop" onMouseDown={() => setDrawer(null)}>
+      <aside className="drawer glass" role="dialog" aria-modal="true" aria-label="Evidence and assumptions" onMouseDown={e => e.stopPropagation()}>
+        <header className="panel-head"><div><span className="eyebrow">CHECK THE EVIDENCE</span><h2>{drawer.flight?.callsign ?? 'Facts & assumptions'}</h2></div><button className="icon-btn ghost" onClick={() => setDrawer(null)} aria-label="Close panel"><X size={18}/></button></header>
+        <div className="panel-scroll"><Evidence scenario={scenario} flight={drawer.flight} summary={summary}/></div>
+      </aside>
+    </div>}
   </div>;
 }
-
-function DecisionDetails({message}:{message:Message}) {
-  const claudeFallback=message.fallback?.from==='jev'&&message.fallback?.to==='claude';
-  const jev=message.provider==='jev'||message.statement_source==='template_from_jev_decision';
-  if(!jev&&!claudeFallback)return null;
-  const decision=claudeFallback?message.primary_decision:message.decision;
-  return <div className={`jev-decision ${claudeFallback?'claude-fallback':''}`}><span className="decision-source">{claudeFallback?'Claude fallback · low-confidence Jev decision':'Jev decision · template-rendered communication'}</span>{decision&&<details><summary>{claudeFallback?'Inspect Jev handoff & model usage':'Inspect typed decision & probabilities'}</summary><p>{claudeFallback?'Jev returned an uncertain decision. Claude generated the operational response above from the same participant context.':'Jev selects from supplied options. The operational wording above is rendered by the application, not generated by Jev.'} Probabilities do not replace operational checks or human approval.</p>{claudeFallback&&<pre>{json(message.fallback)}</pre>}<pre>{json(decision)}</pre>{message.primary_usage&&<pre>{json({primary_usage:message.primary_usage})}</pre>}{message.usage&&<pre>{json({response_usage:message.usage})}</pre>}</details>}</div>;
-}
-function Stat({label,value,caption,icon}:{label:string;value:string;caption:string;icon:React.ReactNode}) {return <div className="stat"><div className="stat-top"><span>{label}</span>{icon}</div><strong>{value}</strong><p>{caption}</p></div>;}
-function CheckRow({check}:{check:ConstraintCheck}) {return <div className={`check-row ${check.passed?'pass':'fail'}`}><span>{check.passed?<CheckCircle2 size={17}/>:<Info size={17}/>}</span><div><strong>{check.label}</strong><p>{check.detail}</p></div><b>{check.passed?'PASS':'UNRESOLVED'}</b></div>;}
-function BaselineComparison({run}:{run:Run}) {if(!run.proposal)return null;if(!run.baseline)return <div className="baseline-comparison"><h3>Fixed-rule comparison unavailable</h3><p>No valid fixed-rule reference was found for this scenario. Missing baseline values are not zero.</p></div>;return <div className="baseline-comparison"><h3>Same situation. Fixed-rule comparison.</h3><table><thead><tr><th>SIMULATED MINUTES</th><th>FIXED RULE</th><th>THIS PLAN</th></tr></thead><tbody>{[['Airborne wait','airborne_wait'],['Surface wait','surface_wait'],['Departure delay','total_delay']].map(([label,key])=><tr key={key}><td>{label}</td><td>{run.baseline!.metrics[key]??'—'}</td><td>{run.proposal!.metrics[key]??'—'}</td></tr>)}</tbody></table><p>Both plans use identical starting conditions and constraints. These are simulation results.</p></div>;}
-function ParticipantCard({participant:p,index,messages,active}:{participant:Participant;index:number;messages:Run['messages'];active:boolean}) {const last=messages.filter(m=>m.sender===p.id).at(-1);return <div className={`participant-card ${p.role}`}><div className="participant-top"><span className="participant-icon" style={{color:COLORS[index%COLORS.length]}}>{p.role==='atc'?<Radio size={20}/>:p.role==='ground'?<Headphones size={20}/>:<Plane size={20}/>}</span><span className={`participant-status ${last?.type==='ACCEPT'?'accepted':''}`}>{last?.type==='ACCEPT'?'Committed':last?.type==='UNABLE'?'Limitation raised':active?'Assessing':last?'Responded':'Ready'}</span></div><span className="participant-role">{ROLE[p.role]??p.role}</span><h3>{p.name}</h3><p>{p.role==='atc'?'Safe sequencing & traffic flow':p.role==='ground'?'Stands, teams & turnaround':'Aircraft limits & passenger impact'}</p></div>;}
-function Timeline({scenario:s,run}:{scenario:Scenario;run:Run|null}) {const max=Math.max(120,...(run?.proposal?.assignments??[]).map(a=>a.departure+5));const pct=(v:number)=>`${Math.max(0,Math.min(100,v/max*100))}%`;return <div className="timeline-scroll"><div className="timeline"><div className="timeline-axis"><div>FLIGHT / ORIGIN</div><div className="axis-track">{[0,1,2,3,4].map(i=><span key={i} style={{left:`${i*25}%`}}>{time(s.clock_start,max*i/4)}</span>)}</div><div>STAND</div></div>{s.flights.map((f,i)=>{const a=run?.proposal?.assignments.find(a=>a.flight_id===f.id);const arrival=a?.arrival??f.reference_arrival;const start=a?.in_block??arrival+f.taxi_in;const end=a?.off_block??start+f.turnaround;return <div className="timeline-row" key={f.id}><div className="timeline-flight"><span className="flight-dot" style={{background:COLORS[i%COLORS.length]}}/><div><b>{f.callsign}</b><small>{f.origin.code} → {s.airport.code}</small></div></div><div className="track"><div className="track-grid">{[0,25,50,75,100].map(v=><span key={v} style={{left:`${v}%`}}/>)}</div><div className="arrival-limit" style={{left:pct(f.reference_arrival),width:pct(f.latest_arrival-f.reference_arrival)}} title={`Arrival window ${time(s.clock_start,f.reference_arrival)}–${time(s.clock_start,f.latest_arrival)}`}/>{start>arrival+f.taxi_in&&<div className="surface-wait-bar" style={{left:pct(arrival+f.taxi_in),width:pct(start-arrival-f.taxi_in)}} title={`${start-arrival-f.taxi_in} min authorised simulated surface waiting`}/>}<div className="handling-bar" style={{left:pct(start),width:pct(end-start),background:COLORS[i%COLORS.length]}} title={`${time(s.clock_start,start)}–${time(s.clock_start,end)} handling`}><span>{a?'Turnaround':'Reference turnaround'}</span></div><span className="arrival-marker" style={{left:pct(arrival),color:COLORS[i%COLORS.length]}} title={`Arrival ${time(s.clock_start,arrival)}`}><Plane size={15}/><small>{time(s.clock_start,arrival)}</small></span></div><div className="stand-value">{a?.stand_id??'Pending'}</div></div>})}<div className="timeline-legend"><span><i className="legend-solid"/>Turnaround interval</span><span><i className="legend-dashed"/>Permitted simulated arrival window</span><span><i className="legend-wait"/>Authorised surface waiting</span><span><Plane size={12}/>Arrival estimate / plan</span></div></div></div>;}
-function Evidence({scenario:s,flight:f,summary}:{scenario:Scenario|null;flight:Flight|null;summary:Record<string,unknown>|null}) {return <div className="evidence-body">{f?<><span className="tiny-tag historical">HISTORICAL SOURCE</span><h3>{typeof f.airline === 'string' ? f.airline : f.airline.name} · {f.origin.code} → {f.destination.code}</h3><p>Tail number {f.tail_number}. These recorded outcomes are separate from the simulated recovery plan.</p><pre>{json(f.historical)}</pre><h3>Trace to original record</h3><pre>{json(f.source)}</pre><h3>Scenario operational inputs</h3><pre>{json({reference_arrival:f.reference_arrival,latest_arrival:f.latest_arrival,turnaround:f.turnaround})}</pre></>:<><div className="evidence-callout"><ShieldCheck size={21}/><p>Real flight identities and recorded outcomes anchor the scenario. Fuel-related limits, runway restrictions, stands, and resources are explicitly simulated.</p></div><h3>Simulation assumptions</h3><div className="assumption-list">{s?.assumptions.map((a,i)=><div key={a.id??i}><span className={`tiny-tag ${a.source==='historical-derived'?'historical':''}`}>{a.source}</span><strong>{a.label}</strong><p>{typeof a.value==='object'?json(a.value):String(a.value)} {a.unit??''}</p></div>)}</div><h3>External approvals</h3>{s?.approvals.length?s.approvals.map(a=><div className="approval-evidence" key={a.id}><span>{a.label}</span><b>{a.status}</b></div>):<p>No external approval dependency in this scenario.</p>}<h3>Scenario provenance</h3><pre>{json(s?.provenance??{})}</pre><h3>Source coverage</h3><p>The supplied records are a disruption-focused subset. They cannot establish normal airport capacity or complete aircraft rotations.</p><pre>{json(summary??{})}</pre></>}</div>;}
-function DataExplorer({onCreated}:{onCreated:(scenario:Scenario)=>void}) {const [airport,setAirport]=useState('ATL');const [date,setDate]=useState('2015-12-30');const [flights,setFlights]=useState<Record<string,unknown>[]>([]);const [selected,setSelected]=useState<string[]>([]);const [error,setError]=useState('');const [busy,setBusy]=useState(false);async function search(){setBusy(true);setError('');try{const r=await api<{flights:Record<string,unknown>[]}>(`/flights?airport=${encodeURIComponent(airport)}&date=${date}&limit=100`);setFlights(r.flights);setSelected([]);}catch(e){setError(String(e));}finally{setBusy(false);}}async function create(){setBusy(true);setError('');try{onCreated(await api<Scenario>('/scenarios',{flight_ids:selected,name:`${airport} selected-flight recovery`}));}catch(e){setError(String(e));}finally{setBusy(false);}}return <div className="data-explorer"><p>Choose qualifying flights at one airport on one date. The scenario builder adds labelled operational assumptions.</p><div className="explorer-form"><label>Arrival airport<input value={airport} onChange={e=>setAirport(e.target.value.toUpperCase())} maxLength={3}/></label><label>Flight date<input type="date" value={date} onChange={e=>setDate(e.target.value)}/></label><button className="button primary" onClick={()=>void search()} disabled={busy}>{busy?<Loader2 size={15} className="spin"/>:<Database size={15}/>}Find flights</button></div>{error&&<div className="alert error">{error}</div>}<div className="explorer-results">{flights.length?flights.map(f=>{const id=String(f.id??f.flight_id??'');const call=String(f.callsign??`${f.AIRLINE??f.airline_code??''}${f.FLIGHT_NUMBER??f.flight_number??''}`);const origin=typeof f.origin==='object'&&f.origin?String((f.origin as {code?:string}).code??''):String(f.ORIGIN_AIRPORT??f.origin_airport??f.origin??'');const h=(f.historical??f) as Record<string,unknown>;return <label className="flight-choice" key={id}><input type="checkbox" checked={selected.includes(id)} onChange={()=>setSelected(prev=>prev.includes(id)?prev.filter(x=>x!==id):[...prev,id])}/><div><strong>{call||id}</strong><span>{origin} → {airport} · Scheduled {histTime(h.scheduled_arrival??f.SCHEDULED_ARRIVAL)}</span></div><span className="tiny-tag historical">RECORD</span></label>}):<div className="empty-small"><Database size={25}/><p>Search the supplied 2015 records to assemble a different coordination scenario.</p></div>}</div><div className="explorer-footer"><span>{selected.length} flight{selected.length!==1?'s':''} selected</span><button className="button primary" disabled={!selected.length||busy} onClick={()=>void create()}>Build scenario <ArrowRight size={15}/></button></div></div>;}
-

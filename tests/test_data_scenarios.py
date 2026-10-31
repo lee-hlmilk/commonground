@@ -67,6 +67,17 @@ class DataScenarioTests(unittest.TestCase):
         self.assertIsNone(self.data.get_flight("unknown"))
         self.assertFalse(self.data.get_flight("flight-4")["qualifies"])
 
+    def test_network_and_airport_profile_count_only_qualifying_records(self):
+        network = self.data.network()
+        self.assertEqual(sorted((r["origin"], r["flights"]) for r in network["routes"]), [("ALB", 1), ("ICT", 1), ("PIT", 1)])
+        atl = next(a for a in network["airports"] if a["code"] == "ATL")
+        self.assertEqual((atl["inbound"], atl["outbound"], atl["weather_inbound"]), (3, 0, 3))
+        self.assertIsInstance(atl["latitude"], float)
+        profile = self.data.airport_profile("ATL")
+        self.assertEqual(profile["dates"], [{"date": "2015-12-30", "flights": 3, "weather": 3, "late_aircraft": 0, "max_weather": 114.0}])
+        self.assertEqual(profile["months"], [{"month": "12", "flights": 3, "weather": 3}])
+        self.assertEqual(profile["airport"]["name"], "Atlanta")
+
     def test_cache_reuse_and_invalidated_checksum(self):
         second=DataRepository(self.root,self.root/"cache.sqlite3")
         self.assertEqual(second.summary()["flight_rows"],4)

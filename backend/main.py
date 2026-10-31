@@ -113,6 +113,19 @@ def create_app(settings=None, repository=None):
     def summary():
         return app.state.data.summary()
 
+    @app.get('/api/network')
+    async def network(limit: int = Query(700, ge=1, le=5000)):
+        data = await asyncio.to_thread(app.state.data.network)
+        return dict(airports=data['airports'], routes=data['routes'][:limit],
+                    route_count=len(data['routes']), note=data['note'])
+
+    @app.get('/api/airports/{code}')
+    async def airport_profile(code: str):
+        code = code.upper()
+        if code not in app.state.data.airports:
+            raise HTTPException(404, 'Airport not found in the supplied airport list.')
+        return await asyncio.to_thread(app.state.data.airport_profile, code)
+
     @app.get('/api/flights')
     def flights(airport: str | None = None, date: str | None = None, airline: str | None = None,
                 weather_delay_min: float | None = None, late_aircraft_delay_min: float | None = None,

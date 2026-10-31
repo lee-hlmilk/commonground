@@ -160,6 +160,54 @@ class DataRepository:
             row = db.execute("SELECT value FROM data_metadata WHERE key='summary'").fetchone()
             return json.loads(row[0])
 
+    def network(self) -> dict[str, Any]:
+        """Aggregate the qualifying records into airports and origin-destination routes."""
+        cached = getattr(self, "_network", None)
+        if cached is not None:
+            return cached
+        with self._connect() as db:
+            rows = db.execute("""SELECT origin, destination, COUNT(*) AS flights,
+                SUM(weather_delay > 15) AS weather, SUM(late_aircraft_delay > 20) AS late_aircraft,
+                AVG(COALESCE(weather_delay,0) + COALESCE(late_aircraft_delay,0)) AS mean_delay
+                FROM data_flights WHERE qualifies=1 GROUP BY origin, destination""").fetchall()
+        airports: dict[str, dict[str, Any]] = {}
+        routes = []
+        for row in rows:
+            for code, direction in ((row["origin"], "outbound"), (row["destination"], "inbound")):
+                if code not in airports:
+                    info = self.airport(code)
+                    if info.get("latitude") is None or info.get("longitude") is None:
+                        continue
+                    airports[code] = {**info, "inbound": 0, "outbound": 0, "weather_inbound": 0}
+                airports[code][direction] += row["flights"]
+            if row["destination"] in airports:
+                airports[row["destination"]]["weather_inbound"] += row["weather"] or 0
+            if row["origin"] in airports and row["destination"] in airports:
+                routes.append({"origin": row["origin"], "destination": row["destination"], "flights": row["flights"],
+                               "weather": row["weather"] or 0, "late_aircraft": row["late_aircraft"] or 0,
+                               "mean_delay": round(row["mean_delay"] or 0, 1)})
+        routes.sort(key=lambda route: -route["flights"])
+        self._network = {"airports": sorted(airports.values(), key=lambda a: -(a["inbound"] + a["outbound"])),
+                         "routes": routes,
+                         "note": "Counts cover the supplied qualifying delayed-flight subset only, not total airport traffic."}
+        return self._network
+
+    def airport_profile(self, code: str, limit: int = 14) -> dict[str, Any]:
+        """Busiest qualifying arrival dates and origins for one destination airport."""
+        with self._connect() as db:
+            dates = db.execute("""SELECT date, COUNT(*) AS flights, SUM(weather_delay > 15) AS weather,
+                SUM(late_aircraft_delay > 20) AS late_aircraft, MAX(weather_delay) AS max_weather
+                FROM data_flights WHERE destination=? AND qualifies=1 GROUP BY date
+                ORDER BY weather DESC, flights DESC LIMIT ?""", (code, limit)).fetchall()
+            origins = db.execute("""SELECT origin, COUNT(*) AS flights FROM data_flights
+                WHERE destination=? AND qualifies=1 GROUP BY origin ORDER BY flights DESC LIMIT 8""", (code,)).fetchall()
+            months = db.execute("""SELECT substr(date,6,2) AS month, COUNT(*) AS flights, SUM(weather_delay > 15) AS weather
+                FROM data_flights WHERE destination=? AND qualifies=1 GROUP BY month ORDER BY month""", (code,)).fetchall()
+        return {"airport": self.airport(code),
+                "dates": [dict(row) for row in dates],
+                "origins": [{**dict(row), "name": self.airport(row["origin"])["name"]} for row in origins],
+                "months": [dict(row) for row in months]}
+
     def airport(self, code: str) -> dict[str, Any]:
         row = self.airports.get(code)
         if not row:

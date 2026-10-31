@@ -77,7 +77,15 @@ The scheduler's metrics are **additional simulated airborne waiting**, **surface
 .venv/Scripts/python.exe -m unittest discover -s tests -v
 npm --prefix frontend run build
 .venv/Scripts/python.exe -m scripts.evaluate
+# Browser smoke test (backend running; uses an installed Chrome/Edge, screenshots go to tmp/screenshots)
+$env:CHROME_EXECUTABLE="C:\Program Files\Google\Chrome\Application\chrome.exe"; node frontend/scripts/smoke.cjs
 ```
+
+## Interface
+
+- **Network globe** — every qualifying delayed route in the supplied records, coloured by weather share. Click an airport for its monthly profile, busiest weather-disruption days, top delayed origins, prepared scenarios, and a builder that turns 1–8 real flights into a new scenario.
+- **Recovery room** — a 3D airport rendered from the scenario: runway (closures shown live), taxiway, contact and remote stands (availability and occupancy), authorised surface holding, holding stack, handling-team vehicles, ATC tower and ground ops. Aircraft fly the exact minutes of the displayed plan and approach from the real bearing of their origin airport. Agent messages are drawn as transmissions between tower, aircraft and ground ops.
+- **Timeline** — scrub or play the plan; lanes show permitted arrival windows, airborne and surface waiting, turnarounds, runway movements with separation, stand availability and closures. Preview the fixed-rule baseline or any solver option in the scene; only the committed proposal can be approved.
 
 The evaluator writes `data/evaluation.json`: five variations of six scenario families, identical starting conditions for candidates and FCFS, feasible/infeasible/approval-blocked outcomes, independently checked violations, and metrics only when comparisons exist. It does **not** fabricate provider consensus or latency results when no live requests were made. Use exported live run histories for those observations.
 
@@ -89,6 +97,7 @@ Interactive documentation is at `/docs` while the server is running.
 | --- | --- |
 | `GET /api/health` | Configuration presence (not a live credential test) |
 | `GET /api/data/summary`, `/api/flights` | Dataset diagnostics and filtered source records |
+| `GET /api/network`, `/api/airports/{code}` | Route/airport aggregates of qualifying records; per-airport dates, months and origins |
 | `GET /api/scenarios`, `/api/scenarios/{id}` | Scenario catalogue and definitions |
 | `POST /api/scenarios` | Build from selected `flight_ids` |
 | `GET /api/runs`, `POST /api/runs` | Saved runs / start live, fallback, illustrative or saved replay |
