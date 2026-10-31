@@ -36,14 +36,18 @@ const shot = (page, name) => page.screenshot({path: path.join(screenshotDir, `${
 
     await page.locator('.scenario-card', {hasText: 'Three arrivals, one recovery plan'}).click();
     await page.locator('.timeline').waitFor();
+    const choices = await page.getByRole('combobox', {name: 'Coordination scenario'}).locator('option').evaluateAll(options => options.map(o => o.value));
+    assert.equal(choices.includes('missing-approval') || choices.includes('infeasible'), false, 'Removed demos must not be selectable');
     await page.getByText('No coordination run yet', {exact: false}).waitFor();
     await page.waitForTimeout(2000);
     await shot(page, '03-ops-empty');
 
     await page.getByRole('button', {name: 'Illustrative replay', exact: true}).click();
     await page.waitForFunction(() => document.querySelectorAll('article.msg').length === 10, undefined, {timeout: 30000});
-    await page.getByText('Your decision needed', {exact: true}).waitFor();
+    await page.locator('.run-banner.applied').waitFor();
     await page.waitForTimeout(3500);
+    const duration = await page.locator('.decision-runtime strong').last().innerText();
+    assert.match(duration, /\d.*s$/, 'Completed run shows its full processing time');
     await shot(page, '04-ops-replay');
 
     const track = await page.locator('.tl-track').boundingBox();
@@ -65,8 +69,9 @@ const shot = (page, name) => page.screenshot({path: path.join(screenshotDir, `${
     await page.getByRole('button', {name: /^Checks/}).click();
     await page.getByText(/independent checks pass/).first().waitFor();
 
-    await page.getByRole('button', {name: 'Approve plan', exact: true}).click();
-    await page.getByText('Plan approved', {exact: true}).waitFor();
+    assert.equal(await page.getByRole('button', {name: 'Approve plan', exact: true}).count(), 0);
+    assert.equal(await page.getByRole('button', {name: 'Decline', exact: true}).count(), 0);
+    assert.equal(await page.locator('.decision-runtime strong').last().innerText(), duration);
     await page.getByRole('button', {name: /Block stand/}).click();
     await page.getByText('Episode 2', {exact: false}).waitFor();
     await page.waitForFunction(() => !document.querySelector('.run-banner.negotiating'), undefined, {timeout: 30000});
@@ -76,35 +81,26 @@ const shot = (page, name) => page.screenshot({path: path.join(screenshotDir, `${
     await page.getByRole('heading', {name: 'Simulation assumptions', exact: true}).waitFor();
     await page.getByRole('button', {name: 'Close panel', exact: true}).click();
 
-    await page.getByRole('combobox', {name: 'Coordination scenario'}).selectOption('missing-approval');
-    await page.getByRole('heading', {name: 'Remote stand awaiting approval'}).waitFor();
-    await page.getByRole('button', {name: 'Illustrative replay', exact: true}).click();
-    await page.waitForFunction(() => !!document.querySelector('.run-banner.unresolved, .run-banner.fallback'), undefined, {timeout: 30000});
-    assert.equal(await page.getByRole('button', {name: 'Approve plan', exact: true}).isEnabled().catch(() => false), false);
-    await page.waitForTimeout(1500);
-    await shot(page, '07-ops-missing-approval');
-    await page.getByRole('button', {name: /Confirm Airport operations approval/}).click();
-    await page.waitForFunction(() => !!document.querySelector('.run-banner.awaiting_approval'), undefined, {timeout: 30000});
-
     await page.getByRole('combobox', {name: 'Replay source'}).selectOption({index: 1});
     await page.getByRole('button', {name: 'Recorded replay', exact: true}).click();
     await page.getByText('Recorded replay · read only', {exact: true}).waitFor();
     assert.equal(await page.getByRole('button', {name: 'Approve plan', exact: true}).isEnabled().catch(() => false), false);
     assert.equal(await page.getByRole('button', {name: /Block stand/}).isEnabled(), false);
 
-    await page.getByRole('combobox', {name: 'Replay source'}).selectOption('');
-    await page.getByRole('combobox', {name: 'Coordination scenario'}).selectOption('infeasible');
+    await page.getByRole('combobox', {name: 'Coordination scenario'}).selectOption('runway-restriction');
+    await page.getByRole('heading', {name: 'Extended runway restriction', exact: true}).waitFor();
+    assert.equal(await page.getByRole('combobox', {name: 'Replay source'}).inputValue(), '', 'Changing scenario must reset the saved replay');
     await page.getByRole('button', {name: 'Illustrative replay', exact: true}).click();
-    await page.waitForFunction(() => !!document.querySelector('.run-banner.unresolved, .run-banner.fallback'), undefined, {timeout: 30000});
+    await page.locator('.run-banner.applied').waitFor();
     await page.waitForTimeout(1500);
-    await shot(page, '08-ops-infeasible');
+    await shot(page, '08-ops-runway-restriction');
 
     await page.setViewportSize({width: 390, height: 844});
     await page.waitForTimeout(800);
     await page.screenshot({path: path.join(screenshotDir, '09-mobile.png'), fullPage: true});
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth), false, 'Mobile page overflows horizontally');
     assert.deepEqual(errors, [], 'Browser runtime errors');
-    console.log('PASS: globe, airport drill-down, recovery room, 10-message replay, timeline scrub, follow camera, FCFS preview, options, checks, approval, disruption, evidence, missing approval, recorded replay, infeasible, mobile; no runtime errors.');
+    console.log('PASS: globe, airport drill-down, recovery room, 10-message replay, timeline scrub, follow camera, FCFS preview, options, checks, automatic application, disruption, evidence, decision runtime, recorded replay, runway restriction, mobile; no runtime errors.');
   } catch (e) {
     await shot(page, 'zz-failure').catch(() => {});
     console.error('Errors so far:', errors);

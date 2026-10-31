@@ -43,7 +43,7 @@ export function stateAt(t: number, s: Schedule): FlightState {
   if (t < s.arrival) return {phase: 'approach', progress: span(t, s.arrival - APPROACH, s.arrival), schedule: s};
   if (t < s.arrival + 1) return {phase: 'landing', progress: span(t, s.arrival, s.arrival + 1), schedule: s};
   if (s.surfaceWait > 0) {
-    const padAt = s.arrival + Math.max(2, s.taxiIn - 1);
+    const padAt = s.arrival + s.taxiIn;
     if (t < padAt) return {phase: 'taxi_in', progress: span(t, s.arrival + 1, padAt), schedule: s};
     if (t < s.inBlock - 1) return {phase: 'surface_hold', progress: span(t, padAt, s.inBlock - 1), schedule: s};
     if (t < s.inBlock) return {phase: 'to_stand', progress: span(t, s.inBlock - 1, s.inBlock), schedule: s};
@@ -64,6 +64,8 @@ export function standStatus(scenario: Scenario, scheds: Schedule[], standId: str
   const stand = scenario.resources.stands.find(s => s.id === standId);
   const occupant = scheds.find(s => s.stand === standId && t >= s.inBlock && t < s.offBlock);
   if (occupant) return {state: 'occupied' as const, flightId: occupant.flightId};
+  const clearing = scheds.find(s => s.stand === standId && t >= s.offBlock && t < s.offBlock + (scenario.resources.stand_clearance_min ?? 0));
+  if (clearing) return {state: 'clearing' as const, flightId: clearing.flightId};
   if (stand && t < stand.available_from) return {state: 'unavailable' as const, until: stand.available_from};
   const next = scheds.filter(s => s.stand === standId && s.inBlock > t).sort((a, b) => a.inBlock - b.inBlock)[0];
   return next ? {state: 'reserved' as const, flightId: next.flightId, at: next.inBlock} : {state: 'free' as const};

@@ -83,6 +83,7 @@ export default function Timeline({scenario, plan, horizon, selectedFlight, onSel
         {scenario.resources.stands.map(st => <div key={st.id} className="tl-row res">
           {st.available_from > 0 && <div className="tl-seg closed" style={{left: 0, width: width(0, st.available_from)}}><span>unavailable</span></div>}
           {scheds.map((s, i) => s.stand === st.id ? <div key={i} className="tl-seg occ" style={{left: pct(s.inBlock), width: width(s.inBlock, s.offBlock), background: FLIGHT_COLORS[i % FLIGHT_COLORS.length]}}><span>{scenario.flights[i].callsign}</span></div> : null)}
+          {scheds.map((s, i) => s.stand === st.id && scenario.resources.stand_clearance_min ? <div key={`clear-${i}`} className="tl-seg surface" style={{left: pct(s.offBlock), width: width(s.offBlock, s.offBlock + scenario.resources.stand_clearance_min)}} title="Stand reserved while pushback clears"/> : null)}
           <StandNow scenario={scenario} standId={st.id} t={now} scheds={scheds}/>
         </div>)}
         <div className="tl-cursor" ref={cursor}><span/></div>

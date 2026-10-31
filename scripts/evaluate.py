@@ -1,4 +1,4 @@
-"""Evaluate the scheduler on 30 labelled counterfactual scenarios.
+"""Evaluate labelled counterfactual variations of the available scenarios.
 
 This intentionally does not claim LLM agreement rates or actual historical
 benefits. Run with: python scripts/evaluate.py

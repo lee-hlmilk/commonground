@@ -179,6 +179,7 @@ function Taxiways({layout}: {layout: Layout}) {
     </group>)}
     <Line points={[[r.entry - 1.2, 0.05, r.z - 3.5], [r.entry + 1.2, 0.05, r.z - 3.5]]} color="#ff9f43" lineWidth={3}/>
     {layout.stands.map(s => <Line key={s.id} points={[[s.leadIn.x, 0.04, TAXI_Z], [s.pos.x, 0.04, s.pos.z]]} color="#f5c542" lineWidth={1} transparent opacity={0.55} dashed dashSize={0.6} gapSize={0.4}/>)}
+    {layout.pads.map((p, i) => <Line key={`pad-${i}`} points={[[p.x, 0.04, TAXI_Z], [p.x, 0.04, p.z]]} color="#a78bfa" lineWidth={1} transparent opacity={0.65} dashed dashSize={0.6} gapSize={0.4}/>)}
   </group>;
 }
 
@@ -236,11 +237,11 @@ function Stand({stand, scenario, scheds, colorOf, selected, onSelect}: {stand: L
   const callsign = (id: string) => scenario.flights.find(f => f.id === id)?.callsign ?? id;
   useFrame(({clock}) => {
     const st = standStatus(scenario, scheds, stand.id, simClock.t);
-    const color = st.state === 'occupied' ? colorOf(st.flightId) : st.state === 'unavailable' ? '#ff4d6d' : st.state === 'reserved' ? '#8aa4c8' : '#38e1d0';
+    const color = st.state === 'occupied' ? colorOf(st.flightId) : st.state === 'clearing' ? '#ffb547' : st.state === 'unavailable' ? '#ff4d6d' : st.state === 'reserved' ? '#8aa4c8' : '#38e1d0';
     if (pad.current) { pad.current.color.set(color); pad.current.opacity = st.state === 'unavailable' ? 0.28 + 0.12 * Math.sin(clock.elapsedTime * 3) : 0.2; }
     if (ring.current) ring.current.color.set(color);
     if (label.current) {
-      const text = st.state === 'occupied' ? callsign(st.flightId) : st.state === 'unavailable' ? `Closed → ${fmt(scenario.clock_start, st.until)}` : st.state === 'reserved' ? `Next ${fmt(scenario.clock_start, st.at)}` : 'Free';
+      const text = st.state === 'occupied' ? callsign(st.flightId) : st.state === 'clearing' ? 'Pushback clearing' : st.state === 'unavailable' ? `Closed → ${fmt(scenario.clock_start, st.until)}` : st.state === 'reserved' ? `Next ${fmt(scenario.clock_start, st.at)}` : 'Free';
       if (label.current.dataset.text !== text) { label.current.dataset.text = text; label.current.lastElementChild!.textContent = text; label.current.dataset.state = st.state; }
     }
   });

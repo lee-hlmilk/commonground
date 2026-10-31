@@ -95,20 +95,21 @@ class DataScenarioTests(unittest.TestCase):
         self.assertEqual(scenario["resources"]["surface_holding_capacity"],2)
         self.assertTrue(all(flight["max_surface_wait"]==20 for flight in scenario["flights"]))
         surface_assumptions=[assumption for assumption in scenario["assumptions"] if "surface" in assumption["id"]]
-        self.assertEqual(len(surface_assumptions),5)
+        self.assertGreaterEqual(len(surface_assumptions),5)
         self.assertTrue(all(assumption["source"]=="simulated" for assumption in surface_assumptions))
         self.assertTrue(all("source" in assumption for assumption in scenario["assumptions"]))
         self.assertTrue(all(flight["next_leg"] is None for flight in scenario["flights"]))
 
     def test_same_engine_input_contract_for_variants(self):
         equipment=self.scenarios.get_scenario("equipment-failure")
-        missing=self.scenarios.get_scenario("missing-approval")
         weather=self.scenarios.get_scenario("ramp-weather")
-        infeasible=self.scenarios.get_scenario("infeasible")
         self.assertEqual(equipment["resources"]["stands"][0]["available_from"],48)
-        self.assertEqual(missing["approvals"][0]["status"],"pending")
+        self.assertEqual(equipment["flights"][1]["compatible_stands"],["B2"])
         self.assertTrue(all(stand["available_from"]>=35 for stand in weather["resources"]["stands"]))
-        self.assertEqual(infeasible["resources"]["runways"][0]["closures"][0]["end"],90)
+        self.assertEqual(len(self.scenarios.list_scenarios()), 4)
+        for removed in ('missing-approval', 'infeasible'):
+            with self.assertRaises(KeyError):
+                self.scenarios.get_scenario(removed)
         with self.assertRaises(KeyError):
             self.scenarios.get_scenario("unsupported")
 

@@ -28,7 +28,6 @@ from .handover import (
     run_handover_negotiation,
 )
 from .scenarios import ScenarioRepository
-from .solver import validate_plan
 from .store import RunStore, now
 
 
@@ -60,12 +59,6 @@ class RunInput(BaseModel):
 class ScenarioInput(BaseModel):
     flight_ids: list[str] = Field(min_length=1, max_length=8)
     name: str | None = Field(default=None, max_length=100)
-
-
-class DecisionInput(BaseModel):
-    proposal_id: str
-    scenario_version: int
-    decision: Literal['approve', 'reject']
 
 
 class DisruptionInput(BaseModel):
@@ -133,6 +126,7 @@ def create_app(settings=None, repository=None):
     @app.get('/api/health')
     def health():
         return dict(status='ok', provider=settings.provider, provider_label=settings.provider_label,
+                    max_rounds=settings.max_rounds,
                     provider_configured=bool(settings.selected_api_key.strip()),
                     fallback_provider='claude' if settings.provider == 'jev' else None,
                     fallback_configured=bool(settings.api_key.strip()) if settings.provider == 'jev' else False,
@@ -188,7 +182,7 @@ def create_app(settings=None, repository=None):
     @app.get('/api/runs')
     def runs():
         return dict(runs=[dict(id=r['id'], status=r['status'], mode=r['mode'], created_at=r['created_at'],
-                               name=r['scenario']['name'], consensus=r['consensus'])
+                               name=r['scenario']['name'], scenario_id=r['scenario']['id'], consensus=r['consensus'])
                           for r in app.state.store.list() if 'scenario' in r])
 
     @app.get('/api/handover/presets')
@@ -297,6 +291,8 @@ def create_app(settings=None, repository=None):
     async def start_run(body: RunInput):
         if body.replay_source_id:
             run = copy.deepcopy(get_run(body.replay_source_id))
+            if body.mode != 'replay' or run.get('scenario', {}).get('id') != body.scenario_id:
+                raise HTTPException(409, 'Choose a saved replay for the selected scenario, or use the authored illustration.')
             if run['status'] == 'negotiating':
                 raise HTTPException(409, 'Wait until the source run finishes before replaying it.')
             run['recording_origin'] = dict(run_id=run['id'], mode=run['mode'], label=run.get('label'))
@@ -343,26 +339,10 @@ def create_app(settings=None, repository=None):
         except ValueError as exc:
             raise HTTPException(422, str(exc))
 
-    @app.post('/api/runs/{run_id}/decision')
-    async def decision(run_id: str, body: DecisionInput):
-        run = get_run(run_id)
-        if run['mode'] == 'recorded_replay':
-            raise HTTPException(409, 'Recorded replays are read-only.')
-        proposal = run.get('proposal')
-        if run['status'] not in ('awaiting_approval', 'fallback') or not proposal:
-            raise HTTPException(409, 'There is no current recommendation awaiting a decision.')
-        if body.scenario_version != run['scenario']['version'] or body.proposal_id != proposal['id']:
-            raise HTTPException(409, 'This proposal is stale. Review the current version.')
-        checks = validate_plan(run['scenario'], proposal)
-        if body.decision == 'approve' and not checks['valid']:
-            raise HTTPException(409, 'The proposal no longer passes all constraints and approvals.')
-        run.update(status='approved' if body.decision == 'approve' else 'rejected', checks=checks['checks'],
-                   decision=dict(by='Duty manager', at=now(), decision=body.decision,
-                                 proposal_id=proposal['id'], scenario_version=body.scenario_version))
-        if body.decision == 'approve':
-            run['applied_plan'] = copy.deepcopy(proposal)
-        app.state.store.save(run)
-        return run
+    @app.post('/api/runs/{run_id}/decision', deprecated=True)
+    def retired_manual_decision(run_id: str):
+        get_run(run_id)
+        raise HTTPException(410, 'Manual approval has been removed. Checked unanimous agreements are applied automatically in the simulation.')
 
     @app.get('/api/runs/{run_id}/export')
     def export(run_id: str):

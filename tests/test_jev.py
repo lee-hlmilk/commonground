@@ -14,7 +14,7 @@ def context(round_number=1, valid=True):
                   scenario_version=1, assignments=[], metrics={}),
              dict(id='plan-b', valid=True, failed_checks=[], scenario_version=1, assignments=[], metrics={})]
     return dict(participant={'id':'pilot-A','role':'pilot','flight_id':'A'}, round=round_number,
-                candidates=plans, proposal=plans[0] if round_number == 2 else None,
+                candidates=plans, proposal=plans[0] if round_number >= 2 else None,
                 scenario_version=1, evidence={'scenario:version':1,'plan:plan-a':{},'plan:plan-b':{},'flight:A:waiting_limit':20},
                 private_information={'aircraft':{'id':'A'}}, received_messages=[])
 
@@ -47,6 +47,8 @@ class JevValidationTests(unittest.TestCase):
         self.assertEqual(result['type'],'PROPOSE')
         self.assertEqual(result['acceptable_plan_ids'],['plan-a','plan-b'])
         self.assertEqual(result['preferred_plan_id'],'plan-a')
+        self.assertIn('Plan A',result['statement'])
+        self.assertNotIn('plan-a',result['statement'])
         self.assertEqual(result['statement_source'],'template_from_jev_decision')
         self.assertEqual(result['decision']['model_version'],'jev-test-build')
 
@@ -69,6 +71,16 @@ class JevValidationTests(unittest.TestCase):
         result=interpret_decision(c,answer(req),req['questions'],.7)
         self.assertEqual(result['type'],'ACCEPT')
         self.assertEqual(result['proposal_id'],'plan-a')
+
+    def test_third_turn_acknowledges_exact_proposal_and_rejects_fourth(self):
+        c=context(3);req=build_request(c,'jev-latest')
+        result=interpret_decision(c,answer(req),req['questions'],.7)
+        self.assertEqual(result['type'],'ACCEPT')
+        self.assertEqual(result['proposal_id'],'plan-a')
+        blocked=context(3,False);blocked_request=build_request(blocked,'jev-latest')
+        self.assertEqual(interpret_decision(blocked,answer(blocked_request),blocked_request['questions'],.7)['type'],'UNABLE')
+        with self.assertRaises(JevAPIError):
+            build_request(context(4),'jev-latest')
 
     def test_failed_external_check_blocks_model_acceptance(self):
         c=context(2,False);req=build_request(c,'jev-latest')

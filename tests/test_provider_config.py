@@ -16,6 +16,9 @@ class ProviderConfigTests(unittest.TestCase):
         self.assertEqual(settings.selected_api_key, 'jev-test')
         self.assertEqual(settings.selected_model, 'jev-test-model')
         self.assertEqual(settings.provider_label, 'Jev')
+        self.assertEqual(Settings(max_rounds=3).max_rounds, 3)
+        with self.assertRaises(ValueError):
+            Settings(max_rounds=4)
         for kwargs in ({'provider':'typo'}, {'jev_min_confidence':.5},
                        {'jev_base_url':'http://untrusted.example/v1'},
                        {'jev_base_url':'https://example.test/v1?api_key=secret'}):

@@ -29,7 +29,8 @@ Each ATC, captain and ground participant still receives an independent role cont
 
 1. **Round one:** A Choice question selects a preferred candidate or review. A Noul question for each candidate evaluates whether that participant can accept it.
 2. **Revision:** Existing code combines participants' acceptable options and preferences, then validates the revised plan.
-3. **Round two:** A Choice question selects acceptance, inability to commit, or escalation for the exact proposal version.
+3. **Turn two:** A Choice question selects acceptance, inability to commit, or escalation for the exact proposal version. The context includes role-specific checks, individual aircraft outcomes, and the explicit required-approval list. An empty list means no external dependency; a checked unanimous agreement is applied automatically inside the simulation.
+4. **Turn three, when needed:** Reconcile objections against those checked facts and any revised proposal. A prior Jev `ESCALATE` can receive a Claude review in this distinct final turn, labelled `final_turn_escalation_review`. The earlier escalation and probabilities remain in the log. A known `UNABLE`, pending approval, or failed constraint does not authorise this review route. Unanimous explicit acceptance is still required for consensus; remaining objections produce a fallback or unresolved result. There is no fourth turn.
 
 At each round, the route applies separately to each participant response. A below-threshold Jev response invokes Claude using the same role-specific operational context. Other participants can continue to use confident Jev decisions.
 
@@ -41,7 +42,7 @@ Confident Jev decisions are converted into short professional statements using d
 
 When confidence is below threshold, Claude generates the operational message. The record identifies the actual responding Claude model and retains the primary Jev decision probabilities and routing reason. An uncertain Jev selection must not be presented as the final participant commitment.
 
-`JEV_MIN_CONFIDENCE=0.7` is an initial application routing setting for this prototype. It is not an aviation safety margin, a validated calibration result, or proof of correctness. Below-threshold confidence triggers Claude escalation. Malformed responses remain errors, and high-confidence `UNABLE` decisions are not rerouted to seek a more agreeable answer. Hard constraints and the duty-manager approval remain mandatory regardless of probabilities or which model answers.
+`JEV_MIN_CONFIDENCE=0.7` is an initial application routing setting for this prototype. It is not an aviation safety margin, a validated calibration result, or proof of correctness. Below-threshold confidence triggers Claude escalation. Malformed responses remain errors, and high-confidence `UNABLE` decisions are not rerouted to seek a more agreeable answer. Hard constraints and unanimous explicit acceptance remain mandatory for automatic application regardless of probabilities or which model answers.
 
 The API's Noul value represents the probability of a yes/true answer, while Choice identifies a supplied option with a probability distribution. [TypeSafe response contract](https://api.typesafe.ai/openapi.json)
 

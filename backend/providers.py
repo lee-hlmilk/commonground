@@ -15,6 +15,34 @@ class JevFirstParticipantClient:
 
     async def respond(self, context):
         started = time.monotonic()
+        reconciliation = context.get('reconciliation', {})
+        previous = reconciliation.get('previous_reply') or {}
+        if (context['round'] == 3 and previous.get('provider') == 'jev'
+                and previous.get('type') == 'ESCALATE'
+                and context.get('proposal_assessment', {}).get('all_checks_pass')
+                and not context['proposal_assessment'].get('missing_external_approvals')
+                and self.settings.api_key.strip()):
+            # A distinct final turn resolves the earlier request for review.
+            # It retains the prior escalation and never reroutes a known UNABLE.
+            if self.fallback is None:
+                self.fallback = self.fallback_factory(self.settings)
+            review_context = copy.deepcopy(context)
+            review_context['decision_review'] = {
+                'reason': 'final_turn_escalation_review',
+                'instruction': 'Independently resolve this same participant’s earlier escalation using the explicit checked facts. '
+                    'A checked unanimous commitment is applied automatically inside the simulation. Preserve any concrete constraint or authority blocker; do not invent approvals.',
+            }
+            try:
+                reply = await self.fallback.respond(review_context)
+            except Exception:
+                raise JevAPIError('Final-turn Claude review could not complete; no agreement was inferred.') from None
+            reply.update(provider='claude', statement_source='claude_generated',
+                review={'from': 'jev', 'to': 'claude', 'reason': 'final_turn_escalation_review',
+                        'previous_round': previous['round'], 'previous_proposal_id': previous['proposal_id'],
+                        'proposal_changed': reconciliation.get('proposal_changed', False)},
+                primary_decision=previous.get('decision'), primary_usage=previous.get('usage'),
+                cascade_seconds=round(time.monotonic() - started, 3))
+            return reply
         try:
             return await self.primary.respond(context)
         except JevLowConfidenceError as uncertainty:

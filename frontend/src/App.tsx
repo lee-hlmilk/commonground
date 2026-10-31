@@ -2,9 +2,10 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { ArrowDownToLine, ArrowRight, ChevronDown, FileText, Globe2, Info, LayoutGrid, Loader2, Play, RefreshCw, X } from 'lucide-react';
 import { api } from './api';
 import type { Flight, Health, Message, Network, Participant, Run, Scenario, ScenarioSummary } from './types';
-import { FLIGHT_COLORS, TYPE_COLORS } from './lib/format';
+import { clock, FLIGHT_COLORS, STATUS, TYPE_COLORS } from './lib/format';
 import { horizonOf } from './lib/sim';
 import { simClock } from './lib/clock';
+import { planNames, readableMessage } from './lib/negotiation';
 import { AirportPanel, GlobeOverview } from './components/GlobePanels';
 import { CommsPanel, DecisionPanel, FlightCard, type ViewPlan } from './components/OpsPanels';
 import Timeline from './components/Timeline';
@@ -14,7 +15,7 @@ import type { Beam, CameraPreset } from './airport/AirportScene';
 const GlobeScene = lazy(() => import('./globe/GlobeScene'));
 const AirportScene = lazy(() => import('./airport/AirportScene'));
 
-type SavedRun = {id: string; name: string; created_at: string; mode: string; status: string};
+type SavedRun = {id: string; scenario_id: string; name: string; created_at: string; mode: string; status: string};
 
 export default function App() {
   const [view, setView] = useState<'globe' | 'ops'>('globe');
@@ -64,6 +65,8 @@ export default function App() {
   useEffect(() => {
     let live = true;
     setLoaded(null); setRun(null); sourceRef.current?.close(); setSelectedFlight(null); setPreset(x => ({name: 'overview', nonce: x.nonce + 1}));
+    setReplaySource(''); setViewPlan({kind: 'proposal'}); setBeams([]); seen.current.clear();
+    timers.current.forEach(clearTimeout); timers.current = [];
     api<Scenario>(`/scenarios/${encodeURIComponent(selected)}`).then(s => { if (live) { setLoaded(s); setStand(s.resources.stands[0]?.id ?? ''); } }).catch(e => { if (live) setError(e.message); });
     return () => { live = false; };
   }, [selected]);
@@ -72,7 +75,8 @@ export default function App() {
     if (!run?.id) return;
     const source = new EventSource(`/api/runs/${run.id}/events`);
     sourceRef.current = source;
-    source.addEventListener('update', e => { try { setRun(JSON.parse((e as MessageEvent).data)); } catch { /* the next event can recover */ } });
+    const runId = run.id;
+    source.addEventListener('update', e => { try { const next = JSON.parse((e as MessageEvent).data) as Run; setRun(current => current?.id === runId ? next : current); } catch { /* the next event can recover */ } });
     return () => source.close();
   }, [run?.id]);
 
@@ -100,9 +104,9 @@ export default function App() {
 
   const plan = useMemo(() => {
     if (!run) return null;
-    if (viewPlan.kind === 'baseline') return run.baseline ?? run.proposal;
-    if (viewPlan.kind === 'candidate') return run.candidates.find(c => c.id === viewPlan.id) ?? run.proposal;
-    return run.proposal;
+    const candidate = viewPlan.kind === 'baseline' ? run.baseline ?? run.proposal
+      : viewPlan.kind === 'candidate' ? run.candidates.find(c => c.id === viewPlan.id) ?? run.proposal : run.proposal;
+    return candidate?.valid && run.scenario.resources.surface_movement_capacity === 1 ? candidate : null;
   }, [run, viewPlan]);
 
   const horizon = useMemo(() => scenario ? horizonOf(scenario, [run?.proposal, run?.baseline, ...(run?.candidates ?? [])]) : 120, [scenario, run?.proposal, run?.baseline, run?.candidates]);
@@ -131,7 +135,6 @@ export default function App() {
       seen.current = new Set(); setViewPlan({kind: 'proposal'}); setRun(next); setView('ops');
     });
   }
-  const decide = (d: 'approve' | 'reject') => run?.proposal && void action(async () => setRun(await api<Run>(`/runs/${run.id}/decision`, {proposal_id: run.proposal!.id, scenario_version: run.scenario.version, decision: d})));
   const disrupt = (body: unknown) => run && void action(async () => { setViewPlan({kind: 'proposal'}); setRun(await api<Run>(`/runs/${run.id}/disruptions`, body)); });
   const openScenario = (id: string) => { setRun(null); setSelected(id); setView('ops'); };
 
@@ -156,7 +159,7 @@ export default function App() {
         </select><ChevronDown size={14}/></div>
         <div className="select small"><select aria-label="Replay source" value={replaySource} onChange={e => setReplaySource(e.target.value)} disabled={busy || active}>
           <option value="">Authored illustration</option>
-          {savedRuns.map(r => <option value={r.id} key={r.id}>{r.name} · {r.mode} · {new Date(r.created_at).toLocaleTimeString()}</option>)}
+          {savedRuns.filter(r => r.scenario_id === selected).map(r => <option value={r.id} key={r.id}>{r.name} · {r.mode} · {new Date(r.created_at).toLocaleTimeString()}</option>)}
         </select><ChevronDown size={14}/></div>
         <button className="btn" disabled={busy || active || !scenario} onClick={() => start('replay')} title="Labelled replay; no model calls"><RefreshCw size={14}/>{replaySource ? 'Recorded replay' : 'Illustrative replay'}</button>
         <button className="btn primary" disabled={busy || active || !scenario || !providerConfigured} onClick={() => start('live')} title={providerConfigured ? `Start independent ${providerName} participants` : `Add ${providerKey} to the backend .env`}>
@@ -195,17 +198,25 @@ export default function App() {
     {view === 'ops' && scenario && <main className="stage ops">
       <div className="scene-head">
         <div className="scenario-title"><span className="eyebrow">{scenario.airport.code} · {scenario.date} · clock {scenario.clock_start}</span><h1>{scenario.name}</h1><p>{scenario.description}</p></div>
+        <div className="scenario-conditions" aria-label="Current scenario constraints">
+          {scenario.resources.runways.flatMap(r => r.closures.map((c, i) => <span key={`${r.id}-${i}`}>{r.id} closed {clock(scenario.clock_start, c.start)}–{clock(scenario.clock_start, c.end)}</span>))}
+          {scenario.resources.stands.filter(s => s.available_from > 0).map(s => <span key={s.id}>Stand {s.id} opens {clock(scenario.clock_start, s.available_from)}</span>)}
+          {scenario.approvals.filter(a => a.status !== 'confirmed').map(a => <span className="blocked" key={a.id}>{a.label}: {a.status}</span>)}
+        </div>
         <div className="camera-bar" role="group" aria-label="Camera">
           {(['overview', 'airspace', 'apron', 'runway'] as CameraPreset[]).map(p => <button key={p} className={preset.name === p && !selectedFlight ? 'active' : ''} onClick={() => { setSelectedFlight(null); setPreset(x => ({name: p, nonce: x.nonce + 1})); }}>{p}</button>)}
           {selectedFlight && <span className="following">following {scenario.flights[flightIndex]?.callsign}</span>}
         </div>
-        {plan && plan !== run?.proposal && <div className="preview-flag">Previewing {plan.kind === 'fallback' ? 'fixed-rule baseline' : 'an alternative option'} — not the plan awaiting approval <button onClick={() => setViewPlan({kind: 'proposal'})}>Show recommended</button></div>}
+        {plan && plan !== run?.proposal && <div className="preview-flag">Previewing {plan.kind === 'fallback' ? 'fixed-rule baseline' : planNames(run).get(plan.id) ?? 'an alternative option'} — the selected plan remains unchanged <button onClick={() => setViewPlan({kind: 'proposal'})}>Show recommended</button></div>}
+        {run && viewPlan.kind === 'candidate' && !plan && <div className="preview-flag info">This option has unresolved checks. Aircraft remain in holding.</div>}
+        {run && scenario.resources.surface_movement_capacity !== 1 && <div className="preview-flag info">This older recording has no taxi-clearance checks. Review its messages, or start a new run to animate a checked schedule.</div>}
         {!run && <div className="preview-flag info">No coordination run yet — aircraft hold at reference positions. Start an illustrative replay or live coordination.</div>}
+        {run && <div className={`scene-outcome ${run.status}`} role="status"><strong>{STATUS[run.status] ?? run.status}</strong><span>{run.status === 'unresolved' ? readableMessage(run.error ?? 'No checked plan is available. Aircraft remain in holding.', planNames(run), scenario) : run.status === 'negotiating' ? 'Participants are evaluating this scenario’s constraints.' : run.proposal ? `${planNames(run).get(run.proposal.id)} · ${run.proposal.metrics.airborne_wait} min added airborne wait · ${run.proposal.metrics.surface_wait} min surface wait` : run.label}</span></div>}
       </div>
       <div className="legend-chips"><span><i className="c-hold"/>holding / airborne wait</span><span><i className="c-surf"/>surface holding</span><span><i className="c-closed"/>closed / unavailable</span><span><i className="c-free"/>free stand</span><span><i className="c-msg"/>agent transmission</span></div>
       <CommsPanel run={run} participants={participants} scenario={scenario} viewPlan={viewPlan} onViewPlan={setViewPlan} onReplayBeams={() => run && fire(run.messages, 650)}
         onBeamMessage={m => fire([m], 0)} onStart={start} busy={busy} collapsed={!left} onToggle={() => setLeft(v => !v)}/>
-      <DecisionPanel run={run} scenario={scenario} viewPlan={viewPlan} onViewPlan={setViewPlan} busy={busy} onDecision={decide} onFallback={() => start('fallback')}
+      <DecisionPanel run={run} scenario={scenario} viewPlan={viewPlan} onViewPlan={setViewPlan} busy={busy} onFallback={() => start('fallback')}
         onDisrupt={disrupt} stand={stand} onStand={setStand} collapsed={!right} onToggle={() => setRight(v => !v)}/>
       {selectedFlight && flightIndex >= 0 && <FlightCard flight={scenario.flights[flightIndex]} index={flightIndex} plan={plan} scenario={scenario} onClose={() => setSelectedFlight(null)} onEvidence={() => setDrawer({flight: scenario.flights[flightIndex]})}/>}
       <Timeline scenario={scenario} plan={plan} horizon={horizon} selectedFlight={selectedFlight} onSelectFlight={setSelectedFlight}/>

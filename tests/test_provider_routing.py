@@ -114,6 +114,37 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
         factory.assert_not_called()
         await cascade.close()
 
+    async def test_final_turn_reviews_prior_escalation_without_rewriting_it(self):
+        proposal = self.plans[0]
+        c = context_for(self.person, self.scenario, self.plans, [], proposal, 3)
+        previous = dict(provider='jev', type='ESCALATE', round=2, proposal_id=proposal['id'],
+                        decision={'answers': {'commitment': {'choice': 'ESCALATE'}}}, usage={'model': 'jev-test'})
+        c['reconciliation'] = dict(previous_reply=previous, proposal_changed=False)
+        primary = client()
+        fallback = client(lambda context: reply_for(context))
+        cascade = JevFirstParticipantClient(self.settings, primary, Mock(return_value=fallback))
+        result = await cascade.respond(c)
+        self.assertEqual(result['type'], 'ACCEPT')
+        self.assertEqual(result['review']['reason'], 'final_turn_escalation_review')
+        self.assertEqual(result['primary_decision'], previous['decision'])
+        self.assertEqual(previous['type'], 'ESCALATE')
+        primary.respond.assert_not_awaited()
+        self.assertEqual(fallback.respond.await_args.args[0]['round'], 3)
+        await cascade.close()
+
+    async def test_final_review_does_not_bypass_refusal_or_failed_checks(self):
+        for kind, valid in [('UNABLE', True), ('ESCALATE', False)]:
+            c = context_for(self.person, self.scenario, self.plans, [], self.plans[0], 3)
+            c['proposal_assessment']['all_checks_pass'] = valid
+            c['reconciliation'] = dict(previous_reply=dict(provider='jev', type=kind, round=2, proposal_id=self.plans[0]['id']))
+            primary = client(lambda context: dict(reply_for(context), type=kind, acceptable_plan_ids=[], preferred_plan_id=None))
+            factory = Mock()
+            cascade = JevFirstParticipantClient(self.settings, primary, factory)
+            result = await cascade.respond(c)
+            self.assertEqual(result['type'], kind)
+            factory.assert_not_called()
+            await cascade.close()
+
     async def test_jev_http_error_does_not_trigger_claude(self):
         for status in (401, 422, 429, 529):
             primary = client(lambda context: (_ for _ in ()).throw(JevAPIError('Safe provider failure', status)))
@@ -177,7 +208,7 @@ class MixedProviderCoordinatorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_mixed_providers_agree_within_same_two_rounds(self):
         run = await self.finish(operation())
-        self.assertEqual(run['status'], 'awaiting_approval')
+        self.assertEqual(run['status'], 'applied')
         self.assertTrue(run['consensus'])
         self.assertEqual(run['round'], 2)
         self.assertEqual(len(run['messages']), len(run['participants']) * 2)

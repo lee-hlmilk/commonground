@@ -47,6 +47,15 @@ class ValidatorTests(unittest.TestCase):
         self.p["assignments"][1].update(arrival=11, in_block=16)
         self.assertRejected("separation")
 
+    def test_shared_taxi_corridor_rejects_simultaneous_movement(self):
+        self.s["resources"]["surface_movement_capacity"] = 1
+        self.assertRejected("surface_movement_capacity")
+
+    def test_stand_cannot_be_reused_during_pushback_clearance(self):
+        self.s["resources"]["stand_clearance_min"] = 2
+        self.p["assignments"][1].update(arrival=30, in_block=35, off_block=55, departure=60, stand_id="S1")
+        self.assertRejected("stand:A:B")
+
     def test_closure(self):
         self.s["resources"]["runways"][0]["closures"] = [{"start": 10, "end": 20}]
         self.assertRejected("closure")

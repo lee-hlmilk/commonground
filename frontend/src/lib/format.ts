@@ -2,7 +2,7 @@ export const FLIGHT_COLORS = ['#38e1d0', '#ffb547', '#a78bfa', '#5aa9ff', '#ff6b
 export const ROLE_COLORS: Record<string, string> = {atc: '#5aa9ff', pilot: '#38e1d0', ground: '#ffb547'};
 export const ROLE_LABEL: Record<string, string> = {atc: 'Air traffic control', pilot: 'Flight captain', ground: 'Ground operations'};
 export const TYPE_COLORS: Record<string, string> = {PROPOSE: '#5aa9ff', ACCEPT: '#4ade80', UNABLE: '#ffb547', PREFER: '#a78bfa', COUNTER: '#a78bfa', REJECT: '#ff6b8b'};
-export const STATUS: Record<string, string> = {negotiating: 'Coordinating', awaiting_approval: 'Your decision needed', approved: 'Plan approved', rejected: 'Plan rejected', fallback: 'Fallback available', unresolved: 'Human review needed', interrupted: 'Coordination interrupted'};
+export const STATUS: Record<string, string> = {negotiating: 'Coordinating', awaiting_approval: 'Agreement recorded', applied: 'Applied automatically', approved: 'Plan applied', rejected: 'Plan rejected', fallback: 'Fallback available', unresolved: 'Human review needed', interrupted: 'Coordination interrupted'};
 
 export function clock(start: string, minutes: number) {
   const [h, m] = start.split(':').map(Number);

@@ -40,7 +40,7 @@ class Settings:
     jev_timeout: float = float(os.getenv('JEV_TIMEOUT_SECONDS', '25'))
     jev_retries: int = int(os.getenv('JEV_MAX_RETRIES', '1'))
     jev_min_confidence: float = float(os.getenv('JEV_MIN_CONFIDENCE', '0.7'))
-    max_rounds: int = int(os.getenv('NEGOTIATION_MAX_ROUNDS', '2'))
+    max_rounds: int = int(os.getenv('NEGOTIATION_MAX_ROUNDS', '3'))
     deadline: float = float(os.getenv('NEGOTIATION_DEADLINE_SECONDS', '120'))
     database: str = os.getenv('DATABASE_PATH', './data/coordination.sqlite3')
     frontend_origin: str = os.getenv('FRONTEND_ORIGIN', 'http://localhost:5173')
@@ -64,8 +64,8 @@ class Settings:
     def __post_init__(self):
         if self.provider not in ('claude', 'jev'):
             raise ValueError('DECISION_PROVIDER must be claude or jev.')
-        if self.max_rounds not in (1, 2):
-            raise ValueError('NEGOTIATION_MAX_ROUNDS must be 1 or 2 for this challenge.')
+        if self.max_rounds not in (1, 2, 3):
+            raise ValueError('NEGOTIATION_MAX_ROUNDS must be between 1 and 3.')
         if self.deadline <= 0 or self.timeout <= 0 or self.max_tokens <= 0:
             raise ValueError('Timeouts and token budget must be positive.')
         if not 0 <= self.retries <= 2:

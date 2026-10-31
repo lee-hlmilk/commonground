@@ -71,8 +71,21 @@ def validate_plan(scenario: dict, plan: dict) -> dict:
         check(prefix + ":stand", f"{label}: compatible and available stand", a["stand_id"] in f["compatible_stands"] and a["in_block"] >= stands[a["stand_id"]].get("available_from", 0), f"Stand {a['stand_id']} must be suitable and ready before entry.")
 
     for a, b in combinations(assignments, 2):
-        overlap = a["stand_id"] == b["stand_id"] and a["in_block"] < b["off_block"] and b["in_block"] < a["off_block"]
-        check(f"stand:{a['flight_id']}:{b['flight_id']}", "Non-overlapping stand occupancy", not overlap, f"{a['flight_id']} / {b['flight_id']}: stand occupation ends at off-block.")
+        clearance = resources.get("stand_clearance_min", 0)
+        overlap = a["stand_id"] == b["stand_id"] and a["in_block"] < b["off_block"] + clearance and b["in_block"] < a["off_block"] + clearance
+        check(f"stand:{a['flight_id']}:{b['flight_id']}", "Non-overlapping stand occupancy", not overlap, f"{a['flight_id']} / {b['flight_id']}: stand release includes {clearance} minutes of pushback clearance.")
+
+    if "surface_movement_capacity" in resources:
+        movements = []
+        for a in assignments:
+            taxi_end = a["arrival"] + flights[a["flight_id"]]["taxi_in"]
+            movements.extend([(a["arrival"], taxi_end), (a["off_block"], a["departure"])])
+            if a["in_block"] > taxi_end:
+                movements.append((a["in_block"] - 1, a["in_block"]))
+        peak = max((sum(start <= t < end for start, end in movements) for t in {start for start, _ in movements}), default=0)
+        capacity = resources["surface_movement_capacity"]
+        check("surface_movement_capacity", "Shared taxi corridor clearance", peak <= capacity,
+              f"Peak moving aircraft {peak}; corridor capacity {capacity}. Includes landing/taxi-in, holding-pad exit and pushback/taxi-out.")
 
     for rid, runway in runways.items():
         sep = runway["separation"]
@@ -127,6 +140,8 @@ def _build_model(scenario: dict, fcfs: bool = False):
     runway_intervals = {r["id"]: [] for r in runways}
     handling = []
     surface_holding = []
+    surface_movements = []
+    stand_clearance = resources.get("stand_clearance_min", 0)
     waits, delays, overtime = [], [], []
     shift_end = resources.get("staff_shift_end", horizon)
     signatures = []
@@ -146,6 +161,17 @@ def _build_model(scenario: dict, fcfs: bool = False):
         model.add(taxi_complete == arrival + flight["taxi_in"])
         model.add(in_block == taxi_complete + surface_duration)
         surface_holding.append(model.new_interval_var(taxi_complete, surface_duration, in_block, f"{fid}_surface_holding"))
+        if "surface_movement_capacity" in resources:
+            surface_movements.append(model.new_fixed_size_interval_var(arrival, flight["taxi_in"], f"{fid}_taxi_in"))
+            taxi_out_duration = model.new_int_var(flight["taxi_out"], horizon, f"{fid}_taxi_out_duration")
+            model.add(taxi_out_duration == departure - off_block)
+            surface_movements.append(model.new_interval_var(off_block, taxi_out_duration, departure, f"{fid}_taxi_out"))
+            has_hold = model.new_bool_var(f"{fid}_has_surface_hold")
+            model.add(surface_duration >= 1).only_enforce_if(has_hold)
+            model.add(surface_duration == 0).only_enforce_if(has_hold.Not())
+            pad_exit = model.new_int_var(0, horizon, f"{fid}_pad_exit_start")
+            model.add(pad_exit == in_block - has_hold)
+            surface_movements.append(model.new_interval_var(pad_exit, has_hold, in_block, f"{fid}_pad_exit"))
         model.add(off_block == in_block + duration)
         model.add(departure >= off_block + flight["taxi_out"])
         handling.append(model.new_interval_var(in_block, duration, off_block, f"{fid}_handling"))
@@ -159,7 +185,7 @@ def _build_model(scenario: dict, fcfs: bool = False):
                 model.add(use == 0)
             model.add(in_block >= stand.get("available_from", 0)).only_enforce_if(use)
             stand_flags.append(use)
-            stand_intervals[stand["id"]].append(model.new_optional_interval_var(in_block, duration, off_block, use, f"{fid}_stand_{s_index}"))
+            stand_intervals[stand["id"]].append(model.new_optional_interval_var(in_block, duration + stand_clearance, off_block + stand_clearance, use, f"{fid}_stand_{s_index}"))
         model.add_exactly_one(stand_flags)
         runway_choice = model.new_int_var(0, len(runways) - 1, f"{fid}_runway")
         runway_flags = []
@@ -189,6 +215,8 @@ def _build_model(scenario: dict, fcfs: bool = False):
         model.add_no_overlap(runway_intervals[runway["id"]])
     model.add_cumulative(handling, [1] * len(handling), resources.get("handling_teams", 1))
     model.add_cumulative(surface_holding, [1] * len(surface_holding), resources.get("surface_holding_capacity", len(flights)))
+    if "surface_movement_capacity" in resources:
+        model.add_cumulative(surface_movements, [1] * len(surface_movements), resources["surface_movement_capacity"])
     if fcfs:
         ordered = sorted(flights, key=lambda f: (f["reference_arrival"], f["id"]))
         for left, right in zip(ordered, ordered[1:]):

@@ -1,10 +1,12 @@
 import { useState } from 'react';
-import { ArrowRight, Check, CheckCircle2, Clock3, Eye, FileText, GitBranch, Headphones, Loader2, MessageSquare, Plane, Radio, ShieldCheck, Sparkles, X, Zap } from 'lucide-react';
+import { ArrowRight, CheckCircle2, Clock3, Eye, FileText, GitBranch, Headphones, Loader2, MessageSquare, Plane, Radio, ShieldCheck, Sparkles, X, Zap } from 'lucide-react';
 import type { Flight, Message, Participant, Plan, Run, Scenario } from '../types';
 import { airlineName, clock, FLIGHT_COLORS, histTime, ROLE_COLORS, ROLE_LABEL, STATUS, TYPE_COLORS } from '../lib/format';
 import { PHASE_LABEL, scheduleFor, stateAt } from '../lib/sim';
 import { useSimClock } from '../lib/clock';
 import { CheckRow, DecisionDetails } from './Evidence';
+import { decisionStory, landingSequence, MESSAGE_ACTION, mentionedPlans, planNames, readableMessage, turnSummary } from '../lib/negotiation';
+import DecisionRuntime from './DecisionRuntime';
 
 export type ViewPlan = {kind: 'proposal'} | {kind: 'baseline'} | {kind: 'candidate'; id: string};
 
@@ -13,6 +15,7 @@ function RoleIcon({role, size = 15}: {role: string; size?: number}) {
 }
 
 function sourceOf(m: Message) {
+  if (m.review?.reason === 'final_turn_escalation_review') return 'Claude · final review';
   if (m.fallback?.to === 'claude') return 'Claude · fallback';
   if (m.provider === 'jev') return 'Jev';
   if (m.provider === 'claude') return 'Claude';
@@ -29,17 +32,20 @@ export function CommsPanel({run, participants, scenario, viewPlan, onViewPlan, o
   const checks = run?.proposal?.checks?.length ? run.proposal.checks : run?.checks ?? [];
   const passed = checks.filter(c => c.passed).length;
   const active = run?.status === 'negotiating';
+  const maxTurns = run ? run.max_rounds ?? 2 : 3;
+  const names = planNames(run);
   const rounds = [...new Set(messages.map(m => `${m.scenario_version}:${m.round}`))];
   if (collapsed) return <button className="panel-tab left glass" onClick={onToggle}><MessageSquare size={16}/> Agents <span>{messages.length}</span></button>;
   return <aside className="ops-panel left glass" aria-label="Agent coordination">
     <header className="panel-head">
-      <div><span className="eyebrow">MULTI-AGENT COORDINATION</span><h2>Independent voices</h2></div>
+      <div><span className="eyebrow">MULTI-AGENT COORDINATION</span><h2>Agent discussion</h2></div>
       <button className="icon-btn ghost" onClick={onToggle} aria-label="Collapse agent panel"><X size={16}/></button>
     </header>
     <div className="round-meter" aria-label="Negotiation rounds">
-      {[1, 2].map(r => <div key={r} className={`round ${run && run.round >= r ? 'reached' : ''} ${run?.round === r && active ? 'live' : ''}`}><b>Round {r}</b><span>{r === 1 ? 'Proposals & limits' : 'Commit to one plan'}</span></div>)}
-      <div className="round-note">Hard limit: 2 rounds · one response per participant per round</div>
+      {Array.from({length: maxTurns}, (_, i) => i + 1).map(r => <div key={r} className={`round ${run && run.round >= r ? 'reached' : ''} ${run?.round === r && active ? 'live' : ''}`}><b>Turn {r}</b><span>{r === 1 ? 'Proposals & limits' : r === 2 ? 'Commit to one plan' : 'Resolve & decide'}</span></div>)}
+      <div className="round-note">At most {maxTurns} turns · one response per participant per turn</div>
     </div>
+    {run && <DecisionRuntime run={run} compact/>}
     <div className="agent-row">{participants.map((p, i) => {
       const last = messages.filter(m => m.sender === p.id).at(-1);
       const state = last?.type === 'ACCEPT' ? 'committed' : last?.type === 'UNABLE' ? 'limit' : active ? 'assessing' : last ? 'responded' : 'ready';
@@ -52,7 +58,7 @@ export function CommsPanel({run, participants, scenario, viewPlan, onViewPlan, o
       </div>;
     })}</div>
     <div className="tabs">
-      <button className={tab === 'comms' ? 'active' : ''} onClick={() => setTab('comms')}>Transmissions <span>{messages.length}</span></button>
+      <button className={tab === 'comms' ? 'active' : ''} onClick={() => setTab('comms')}>Discussion <span>{messages.length}</span></button>
       <button className={tab === 'checks' ? 'active' : ''} onClick={() => setTab('checks')}>Checks <span className={checks.length && passed < checks.length ? 'warn' : ''}>{checks.length ? `${passed}/${checks.length}` : 0}</span></button>
       <button className={tab === 'candidates' ? 'active' : ''} onClick={() => setTab('candidates')}>Options <span>{run?.candidates?.length ?? 0}</span></button>
     </div>
@@ -62,20 +68,24 @@ export function CommsPanel({run, participants, scenario, viewPlan, onViewPlan, o
         {messages.length ? rounds.map(key => {
           const [version, round] = key.split(':');
           return <div key={key} className="round-group">
-            <div className="round-divider"><span>Round {round}</span><em>scenario v{version}</em></div>
+            <div className="round-divider"><span>Turn {round}</span><em>scenario v{version}</em></div>
+            {run && <p className="turn-summary">{turnSummary(run, Number(round), Number(version))}</p>}
             {messages.filter(m => `${m.scenario_version}:${m.round}` === key).map(m => {
               const p = participants.find(x => x.id === m.sender);
-              return <article key={m.id} className="msg" onClick={() => onBeamMessage(m)} style={{'--c': ROLE_COLORS[p?.role ?? 'atc']} as React.CSSProperties}>
+              const references = mentionedPlans(m, names);
+              return <article key={m.id} className="msg" style={{'--c': ROLE_COLORS[p?.role ?? 'atc']} as React.CSSProperties}>
                 <div className="msg-avatar"><RoleIcon role={p?.role ?? ''} size={14}/></div>
                 <div className="msg-body">
-                  <div className="msg-head"><strong>{p?.name ?? m.sender}</strong><span className="type" style={{color: TYPE_COLORS[m.type] ?? '#cbd5e1', borderColor: TYPE_COLORS[m.type] ?? '#475569'}}>{m.type}</span></div>
-                  <p>{m.statement}</p>
+                  <div className="msg-head"><strong>{p?.name ?? m.sender}</strong><span className="type" style={{color: TYPE_COLORS[m.type] ?? '#cbd5e1', borderColor: TYPE_COLORS[m.type] ?? '#475569'}}>{MESSAGE_ACTION[m.type] ?? m.type}</span></div>
+                  <p className="message-statement">{readableMessage(m.statement, names, scenario)}</p>
+                  {references.length > 0 && <div className="message-plans" aria-label="Plans mentioned in this message">{references.slice(0, 4).map(id => <button key={id} onClick={() => onViewPlan(id === run?.proposal?.id ? {kind: 'proposal'} : id === run?.baseline?.id && !run.candidates.some(c => c.id === id) ? {kind: 'baseline'} : {kind: 'candidate', id})}><Eye size={11}/>{names.get(id)}</button>)}{references.length > 4 && <button onClick={() => setTab('candidates')}>+{references.length - 4} more options</button>}</div>}
                   <div className="msg-meta">
                     {m.recipients?.length > 0 && <span>→ {m.recipients.map(id => participants.find(x => x.id === id)?.name.split(' ')[0] ?? id).join(', ')}</span>}
-                    {m.evidence_refs?.length ? <span><FileText size={10}/> {m.evidence_refs.length} evidence</span> : null}
+                    {m.evidence_refs?.length ? <span><FileText size={10}/> {m.evidence_refs.length} reference{m.evidence_refs.length === 1 ? '' : 's'}</span> : null}
                     <span className="src">{sourceOf(m)}</span>
                   </div>
-                  <DecisionDetails message={m}/>
+                  <div className="message-tools"><button className="text-btn" onClick={() => onBeamMessage(m)}><Radio size={11}/> Show transmission</button></div>
+                  <details className="message-audit"><summary>Evidence & model details</summary><DecisionDetails message={m}/><p className="fine">Original recorded message</p><p>{m.statement}</p></details>
                 </div>
               </article>;
             })}
@@ -90,8 +100,8 @@ export function CommsPanel({run, participants, scenario, viewPlan, onViewPlan, o
       </>}
       {tab === 'checks' && (checks.length ? <div className="checks">
         <div className={`check-summary ${passed === checks.length ? 'ok' : 'bad'}`}><ShieldCheck size={16}/>{passed === checks.length ? `All ${checks.length} independent checks pass` : `${checks.length - passed} of ${checks.length} checks unresolved`}</div>
-        {[...checks].sort((a, b) => Number(a.passed) - Number(b.passed)).map((c, i) => <CheckRow key={`${c.id}-${i}`} check={c}/>)}
-      </div> : <div className="empty"><ShieldCheck size={24}/><p>Checks appear once a plan has been evaluated. No unchecked plan can be approved.</p></div>)}
+        {[...checks].sort((a, b) => Number(a.passed) - Number(b.passed)).map((c, i) => <CheckRow key={`${c.id}-${i}`} check={{...c, label: readableMessage(c.label, names, scenario), detail: readableMessage(c.detail, names, scenario)}}/>)}
+      </div> : <div className="empty"><ShieldCheck size={24}/><p>Checks appear once a plan has been evaluated. Only a checked unanimous agreement is applied.</p></div>)}
       {tab === 'candidates' && <Candidates run={run} scenario={scenario} viewPlan={viewPlan} onViewPlan={onViewPlan}/>}
     </div>
   </aside>;
@@ -99,47 +109,63 @@ export function CommsPanel({run, participants, scenario, viewPlan, onViewPlan, o
 
 function Candidates({run, scenario, viewPlan, onViewPlan}: {run: Run | null; scenario: Scenario; viewPlan: ViewPlan; onViewPlan: (v: ViewPlan) => void}) {
   if (!run?.candidates?.length && !run?.baseline) return <div className="empty"><GitBranch size={24}/><p>The OR-Tools solver generates up to twelve checked options. They appear here once a run starts.</p></div>;
+  const names = planNames(run);
   const rows: {plan: Plan; view: ViewPlan; label: string}[] = [
-    ...(run.baseline ? [{plan: run.baseline, view: {kind: 'baseline'} as ViewPlan, label: 'Fixed-rule FCFS baseline'}] : []),
-    ...run.candidates.map((p, i) => ({plan: p, view: (p.id === run.proposal?.id ? {kind: 'proposal'} : {kind: 'candidate', id: p.id}) as ViewPlan, label: `Option ${i + 1}${p.id === run.proposal?.id ? ' · selected' : ''}`})),
+    ...(run.baseline ? [{plan: run.baseline, view: {kind: 'baseline'} as ViewPlan, label: `First-come-first-served · ${names.get(run.baseline.id)}`} ] : []),
+    ...run.candidates.map(p => ({plan: p, view: (p.id === run.proposal?.id ? {kind: 'proposal'} : {kind: 'candidate', id: p.id}) as ViewPlan, label: `${names.get(p.id)}${p.id === run.proposal?.id ? run.consensus ? ' · agreed' : ' · proposed' : ''}`})),
   ];
   const isActive = (v: ViewPlan) => v.kind === viewPlan.kind && (v.kind !== 'candidate' || (viewPlan.kind === 'candidate' && viewPlan.id === v.id));
   return <div className="candidates">
-    <p className="hint">Preview any option in the 3D scene. Only the plan the participants committed to can be approved.</p>
+    <p className="hint">Preview checked options in the 3D scene. Options with unresolved checks keep aircraft in holding. Only the checked plan accepted by every participant is applied.</p>
     {rows.map(r => <button key={r.plan.id + r.label} className={`cand ${isActive(r.view) ? 'active' : ''} ${r.plan.kind === 'fallback' ? 'base' : ''}`} onClick={() => onViewPlan(r.view)}>
       <div className="cand-head"><b>{r.label}</b>{isActive(r.view) && <Eye size={13}/>}</div>
+      <p className="cand-sequence">Land {landingSequence(r.plan, scenario)}.</p>
       <div className="cand-stands">{r.plan.assignments.map(a => { const i = scenario.flights.findIndex(f => f.id === a.flight_id); return <span key={a.flight_id} style={{color: FLIGHT_COLORS[i % FLIGHT_COLORS.length]}}>{scenario.flights[i]?.callsign} {a.stand_id} {clock(scenario.clock_start, a.arrival)}</span>; })}</div>
-      <div className="cand-metrics"><span>air {r.plan.metrics.airborne_wait ?? '—'}</span><span>surface {r.plan.metrics.surface_wait ?? '—'}</span><span>delay {r.plan.metrics.total_delay ?? '—'}</span></div>
+      <div className="cand-metrics"><span>{r.plan.metrics.airborne_wait ?? '—'} min airborne wait</span><span>{r.plan.metrics.surface_wait ?? '—'} min ground wait</span></div>
     </button>)}
   </div>;
 }
 
 const METRICS: [string, string][] = [['airborne_wait', 'Added airborne wait'], ['surface_wait', 'Surface waiting'], ['total_delay', 'Departure delay vs target'], ['overtime', 'Staff overtime'], ['connection_exposure', 'Connection exposure']];
 
-export function DecisionPanel({run, scenario, viewPlan, onViewPlan, busy, onDecision, onFallback, onDisrupt, stand, onStand, collapsed, onToggle}: {
+export function DecisionPanel({run, scenario, viewPlan, onViewPlan, busy, onFallback, onDisrupt, stand, onStand, collapsed, onToggle}: {
   run: Run | null; scenario: Scenario; viewPlan: ViewPlan; onViewPlan: (v: ViewPlan) => void; busy: boolean;
-  onDecision: (d: 'approve' | 'reject') => void; onFallback: () => void; onDisrupt: (body: unknown) => void; stand: string; onStand: (s: string) => void;
+  onFallback: () => void; onDisrupt: (body: unknown) => void; stand: string; onStand: (s: string) => void;
   collapsed: boolean; onToggle: () => void;
 }) {
   if (collapsed) return <button className="panel-tab right glass" onClick={onToggle}><ShieldCheck size={16}/> Decision</button>;
   const recorded = run?.mode === 'recorded_replay';
   const active = run?.status === 'negotiating';
-  const canDecide = !!run?.proposal && !recorded && ['awaiting_approval', 'fallback'].includes(run.status);
   const p = run?.proposal;
   const failed = p?.checks?.filter(c => !c.passed) ?? [];
-  return <aside className="ops-panel right glass" aria-label="Duty manager decision">
+  const story = run ? decisionStory(run, scenario) : null;
+  const names = planNames(run);
+  return <aside className="ops-panel right glass" aria-label="Agent decision">
     <header className="panel-head">
-      <div><span className="eyebrow">DUTY MANAGER · FINAL AUTHORITY</span><h2>Your decision, with evidence</h2></div>
+      <div><span className="eyebrow">MULTI-AGENT OUTCOME</span><h2>Decision & next steps</h2></div>
       <button className="icon-btn ghost" onClick={onToggle} aria-label="Collapse decision panel"><X size={16}/></button>
     </header>
     <div className="panel-scroll">
       {run && <div className={`run-banner ${run.status}`}>
         <span className={`dot ${active ? 'pulse' : ''}`}/><strong>{STATUS[run.status] ?? run.status}</strong>
         <em>{run.mode === 'live' ? (run.provider === 'jev' ? 'Live · Jev typed decisions' : 'Live · Claude') : recorded ? 'Recorded replay · read only' : run.mode === 'replay' ? 'Illustrative replay · authored' : 'Deterministic · no AI consensus'}</em>
-        <small>Episode {run.episode} · round {run.round}/2 · v{run.scenario.version}</small>
+        <small>Episode {run.episode} · turn {run.round}/{run.max_rounds ?? 2} · v{run.scenario.version}</small>
       </div>}
+      {run && <DecisionRuntime run={run}/>}
+      {story && <section className={`decision-story ${story.tone}`} aria-label="Decision explained">
+        <span className="eyebrow">{run?.consensus ? 'THE SHARED DECISION' : 'CURRENT OUTCOME'}</span><h3>{story.title}</h3><p>{story.explanation}</p>
+        {story.choices?.length ? <div className="critical-choices"><h4>Critical choices</h4>{story.choices.map(choice => <section className={`critical-choice ${choice.kind}`} key={choice.kind}><h5>{choice.title}</h5><p>{choice.detail}</p></section>)}</div> : story.constraint && <p>{story.constraint}</p>}
+        {story.tradeoff && <div className="decision-tradeoff"><span>VERSUS FIRST-COME-FIRST-SERVED</span><p>{story.tradeoff}</p></div>}
+        {story.consequences?.length ? <div className="flight-consequences"><h4>Who absorbs the waiting?</h4>{story.consequences.map(row => <div key={row.flight}><b>{row.flight}</b><p>{row.airborne} min airborne · {row.ground} min ground holding · {row.arrivalMargin} min arrival margin</p>{row.change && <small>Versus arrival-order baseline: {row.change}.</small>}</div>)}</div> : null}
+        {story.alternative && <section className="critical-choice alternative"><h5>{story.alternative.title}</h5><p>{story.alternative.detail}</p>{story.alternative.comparisonPlanId && <button className="text-btn" onClick={() => onViewPlan({kind: 'candidate', id: story.alternative!.comparisonPlanId!})}><Eye size={12}/>Preview {names.get(story.alternative.comparisonPlanId)}</button>}</section>}
+        <p className="decision-next">{story.next}</p>
+      </section>}
       {p ? <>
-        <div className={`consensus ${run!.consensus ? 'yes' : 'no'}`}>{run!.consensus ? <CheckCircle2 size={16}/> : <Clock3 size={16}/>}<span>{run!.consensus ? (recorded ? 'Saved participant agreement' : 'All participants committed to this exact plan') : 'No negotiated consensus — fixed-rule result'}</span></div>
+        <div className={`consensus ${run!.consensus ? 'yes' : 'no'}`}>{run!.consensus ? <CheckCircle2 size={16}/> : <Clock3 size={16}/>}<span>{run!.consensus ? (recorded ? 'Saved participant agreement' : 'All participants committed to this exact plan') : run!.status === 'fallback' ? 'No negotiated consensus — fixed-rule result' : 'Participants have not committed to a checked plan'}</span></div>
+        <div className={`check-summary ${failed.length ? 'bad' : 'ok'}`}><ShieldCheck size={16}/>{failed.length ? `${failed.length} unresolved check${failed.length > 1 ? 's' : ''} — cannot apply` : `${p.checks.length} independent checks pass`}</div>
+        {failed.slice(0, 3).map((c, i) => <CheckRow key={i} check={{...c, label: readableMessage(c.label, names, scenario), detail: readableMessage(c.detail, names, scenario)}}/>)}
+        <div className="schedule-heading"><h3>{names.get(p.id)} · flight schedule</h3><span>Airport local time</span></div>
+        {viewPlan.kind !== 'proposal' && <p className="preview-note">You are previewing another option in the scene. The decision above still refers to {names.get(p.id)}.</p>}
         <div className="view-switch" role="group" aria-label="Plan shown in scene">
           <button className={viewPlan.kind === 'proposal' ? 'active' : ''} onClick={() => onViewPlan({kind: 'proposal'})}>Recommended</button>
           <button className={viewPlan.kind === 'baseline' ? 'active' : ''} disabled={!run!.baseline} onClick={() => onViewPlan({kind: 'baseline'})}>Fixed rule (FCFS)</button>
@@ -151,8 +177,8 @@ export function DecisionPanel({run, scenario, viewPlan, onViewPlan, busy, onDeci
             <td>{clock(scenario.clock_start, a.arrival)}{f && a.arrival > f.reference_arrival ? <small>+{a.arrival - f.reference_arrival}</small> : null}</td>
             <td><b>{a.stand_id}</b></td><td>{clock(scenario.clock_start, a.departure)}</td></tr>; })}</tbody>
         </table>
-        <div className="compare">
-          <div className="compare-head"><span>SIMULATED MINUTES</span><span>FCFS</span><span>PLAN</span></div>
+        <details className="decision-detail"><summary>Compare with first-come-first-served</summary><div className="compare">
+          <div className="compare-head"><span>SIMULATION TOTALS</span><span>BASELINE</span><span>PLAN</span></div>
           {METRICS.map(([k, label]) => {
             const plan = p.metrics[k], base = run!.baseline?.metrics[k];
             const max = Math.max(1, plan ?? 0, base ?? 0);
@@ -165,20 +191,13 @@ export function DecisionPanel({run, scenario, viewPlan, onViewPlan, busy, onDeci
             </div>;
           })}
           <p className="fine">{run!.baseline ? 'Identical starting conditions and constraints. Simulation outputs — not measured savings.' : 'No valid fixed-rule reference for this scenario. Missing values are not zero.'}</p>
-        </div>
-        <div className={`check-summary ${failed.length ? 'bad' : 'ok'}`}><ShieldCheck size={16}/>{failed.length ? `${failed.length} unresolved check${failed.length > 1 ? 's' : ''} — cannot apply` : `${p.checks.length} independent checks pass`}</div>
-        {failed.slice(0, 3).map((c, i) => <CheckRow key={i} check={c}/>)}
-        <div className="approve-row">
-          <button className="btn primary" disabled={!canDecide || busy || !p.valid} onClick={() => onDecision('approve')}><Check size={16}/>Approve plan</button>
-          <button className="btn" disabled={!canDecide || busy} onClick={() => onDecision('reject')}>Decline</button>
-        </div>
-        <p className="fine">{recorded ? 'Recorded replays are read-only.' : 'Approval records a simulated applied plan. No live operational clearance is issued.'}</p>
-      </> : <div className="empty"><ShieldCheck size={24}/><p>A recommendation appears after participants respond. Agreement means every participant commits to one exact plan — never a majority vote.</p></div>}
-      {run?.error && <p className="inline-error">{run.error}</p>}
+        </div></details>
+      </> : !run && <div className="empty"><ShieldCheck size={24}/><p>A recommendation appears after participants respond. Agreement means every participant commits to one exact plan — never a majority vote.</p></div>}
+      {run?.error && p && <p className="inline-error">{readableMessage(run.error, names, scenario)}</p>}
       <button className="btn ghost full" disabled={busy || active} onClick={onFallback}><GitBranch size={14}/> Evaluate deterministic fallback</button>
       <section className="disrupt">
         <div className="sub-head"><Zap size={15}/><h3>Inject a disruption</h3><span className="tag simulated">SIMULATED</span></div>
-        <p>New information invalidates commitments and approvals, archives the episode, and coordinates again. Tip: click a stand in the scene.</p>
+        <p>New information invalidates the previous agreement and applied plan, archives the episode, and coordinates again. Tip: click a stand in the scene.</p>
         <label>Stand<select value={stand} onChange={e => onStand(e.target.value)} aria-label="Stand to make unavailable">{scenario.resources.stands.map(s => <option key={s.id} value={s.id}>{s.id}</option>)}</select></label>
         <button className="btn full" disabled={!run || busy || recorded || !stand || active} onClick={() => onDisrupt({type: 'stand_unavailable', stand_id: stand, available_from: 90})}><Zap size={14}/> Block stand {stand} until {clock(scenario.clock_start, 90)}</button>
         <button className="btn full" disabled={!run || busy || recorded || active} onClick={() => onDisrupt({type: 'runway_closure', start: 15, end: 40})}><Clock3 size={14}/> Close runway {clock(scenario.clock_start, 15)}–{clock(scenario.clock_start, 40)}</button>

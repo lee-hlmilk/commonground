@@ -12,10 +12,8 @@ from .data import DataRepository, parse_hhmm
 CATALOGUE = [
     ("atl-three-flight-clash", "Three arrivals, one recovery plan", "Three real weather-delayed ATL flights compete for simulated runway and stand availability."),
     ("equipment-failure", "Pushback equipment unavailable", "A failed tug delays stand release and the subsequent turnaround sequence."),
-    ("missing-approval", "Remote stand awaiting approval", "An external airport approval remains pending; no participant may invent its release."),
     ("runway-restriction", "Extended runway restriction", "A longer temporary closure compresses the arrival sequence."),
     ("ramp-weather", "Ramp work suspended", "Simulated unsafe ramp weather defers stand availability and ground handling."),
-    ("infeasible", "No safe arrival window", "A deliberate conflict between runway closure and aircraft waiting limits requires escalation."),
 ]
 
 
@@ -42,10 +40,11 @@ class ScenarioRepository:
         scenario = self._build(self._demo_flights(),"10:15",scenario_id,definition[1],definition[2])
         if scenario_id == "equipment-failure":
             scenario["resources"]["stands"][0]["available_from"] = 48
+            affected = scenario["flights"][1]
+            affected["compatible_stands"] = ["B2"]
             scenario["assumptions"].append(self._assumption("tug-failure","Failed tug delays B2 release",48,"minutes from scenario start"))
-        elif scenario_id == "missing-approval":
-            scenario["approvals"] = [{"id":"remote-stand-approval","label":"Airport operations approval for remote stand R1","status":"pending"}]
-            scenario["assumptions"].append(self._assumption("external-approval","Required external approval remains pending","pending","status"))
+            scenario["assumptions"].append(self._assumption("tug-affected-aircraft",affected["callsign"] + " requires the affected stand B2",["B2"],"stand IDs"))
+            next(a for a in scenario["assumptions"] if a["id"] == affected["id"] + "-compatibility")["value"] = ["B2"]
         elif scenario_id == "runway-restriction":
             scenario["resources"]["runways"][0]["closures"] = [{"start":0,"end":27}]
             scenario["assumptions"].append(self._assumption("extended-closure","Runway closed until",27,"minutes from scenario start"))
@@ -53,9 +52,6 @@ class ScenarioRepository:
             for stand in scenario["resources"]["stands"]:
                 stand["available_from"] = max(stand["available_from"],35)
             scenario["assumptions"].append(self._assumption("ramp-suspension","Ramp work unavailable until",35,"minutes from scenario start"))
-        elif scenario_id == "infeasible":
-            scenario["resources"]["runways"][0]["closures"] = [{"start":0,"end":90}]
-            scenario["assumptions"].append(self._assumption("no-window","Runway closure exceeds all arrival limits",90,"minutes from scenario start"))
         self._sync_assumptions(scenario)
         return scenario
 
@@ -80,6 +76,8 @@ class ScenarioRepository:
             self._assumption("handling-teams","Available concurrent handling teams",2,"teams"),
             self._assumption("surface-holding-capacity","Authorised simulated surface holding location capacity",2,"aircraft"),
             self._assumption("surface-holding-authority","Scenario airport authority permits bounded waiting at a designated surface holding location","authorised in simulation only","authorisation"),
+            self._assumption("surface-movement-capacity","Shared taxi corridor permits one moving aircraft at a time",1,"aircraft"),
+            self._assumption("stand-clearance","Pushback clearance before stand reuse",2,"minutes"),
             self._assumption("stand-availability","Stand earliest availability",{"B2":30,"C2":0,"R1":0},"minutes from scenario start"),
             self._assumption("scope","Background traffic is represented by restrictions; source data is not complete airport traffic","bounded simulation","scope"),
         ]
@@ -116,7 +114,7 @@ class ScenarioRepository:
                 self._assumption(f"{flight['id']}-compatibility","Illustrative stand compatibility for "+flight["callsign"],["B2","C2","R1"],"stand IDs"),
                 self._assumption(f"{flight['id']}-departure-target","Illustrative onward departure target for "+flight["callsign"]+(" from an unconfirmed same-tail candidate" if next_leg else " with no observed candidate"),scheduled_departure,"minutes from scenario start","historical-derived" if next_leg else "simulated"),
             ])
-        return {"id":identifier,"name":name,"description":description,"airport":flights[0]["destination"],"date":flights[0]["date"],"clock_start":clock_start,"version":1,"horizon":120,"flights":working,"resources":{"runways":[{"id":"RWY-1","separation":3,"closures":[{"start":10,"end":20}]}],"stands":[{"id":"B2","available_from":30},{"id":"C2","available_from":0},{"id":"R1","available_from":0}],"handling_teams":2,"surface_holding_capacity":2},"approvals":[],"assumptions":assumptions,"provenance":{"flight_file":self.data.paths["flights"].name,"checksums":self.data.checksums,"source_records":[flight["source"] for flight in flights],"mode":"counterfactual","reference_note":"Recorded landing times are historical-derived reference estimates used to initialise a counterfactual simulation, not forecasts available to historical controllers.","rotation_note":"Same-tail onward flights are candidates only; intervening records may be absent.","coverage_note":"Filtered delayed flights do not establish full airport demand or normal airport capacity."}}
+        return {"id":identifier,"name":name,"description":description,"airport":flights[0]["destination"],"date":flights[0]["date"],"clock_start":clock_start,"version":1,"horizon":120,"flights":working,"resources":{"runways":[{"id":"RWY-1","separation":3,"closures":[{"start":10,"end":20}]}],"stands":[{"id":"B2","available_from":30},{"id":"C2","available_from":0},{"id":"R1","available_from":0}],"handling_teams":2,"surface_holding_capacity":2,"surface_movement_capacity":1,"stand_clearance_min":2},"approvals":[],"assumptions":assumptions,"provenance":{"flight_file":self.data.paths["flights"].name,"checksums":self.data.checksums,"source_records":[flight["source"] for flight in flights],"mode":"counterfactual","reference_note":"Recorded landing times are historical-derived reference estimates used to initialise a counterfactual simulation, not forecasts available to historical controllers.","rotation_note":"Same-tail onward flights are candidates only; intervening records may be absent.","coverage_note":"Filtered delayed flights do not establish full airport demand or normal airport capacity."}}
 
     def build_scenario(self, flight_ids: list[str], name: str | None = None) -> dict[str, Any]:
         if not flight_ids or len(flight_ids) > 8:

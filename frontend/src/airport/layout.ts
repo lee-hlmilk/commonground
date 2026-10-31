@@ -32,8 +32,8 @@ export function buildLayout(scenario: Scenario): Layout {
     ...contact.map((s, i) => ({id: s.id, pos: V(-12 + i * 12, 0, -18), leadIn: V(-12 + i * 12, 0, -11.5), remote: false})),
     ...remote.map((s, i) => ({id: s.id, pos: V(36 + i * 12, 0, -21), leadIn: V(36 + i * 12, 0, -12), remote: true})),
   ];
-  const padCount = Math.max(2, Number((scenario.resources as {surface_holding_capacity?: number}).surface_holding_capacity ?? 2));
-  const pads = Array.from({length: padCount}, (_, i) => V(-28 + i * 7.5, 0, -12));
+  const padCount = Math.max(0, scenario.resources.surface_holding_capacity ?? 2);
+  const pads = Array.from({length: padCount}, (_, i) => V(-58 - i * 10, 0, -20));
   const lastContact = contact.length ? -12 + (contact.length - 1) * 12 : 0;
   const airport = scenario.airport as {latitude?: number; longitude?: number};
   const inbound = new Map<string, THREE.Vector3>();
@@ -70,11 +70,15 @@ export class Flightpath {
   private pad = new Map<string, number>();
   constructor(layout: Layout, schedules: Schedule[]) {
     this.layout = layout;
-    schedules.filter(s => s.surfaceWait > 0).sort((a, b) => a.arrival - b.arrival).forEach((s, i) => this.pad.set(s.flightId, i % layout.pads.length));
+    const freeAt = layout.pads.map(() => -Infinity);
+    schedules.filter(s => s.surfaceWait > 0).sort((a, b) => a.arrival + a.taxiIn - b.arrival - b.taxiIn).forEach(s => {
+      const index = freeAt.findIndex(t => t <= s.arrival + s.taxiIn);
+      if (index >= 0) { this.pad.set(s.flightId, index); freeAt[index] = s.inBlock; }
+    });
   }
   private runway(s: Schedule) { return this.layout.runways.find(r => r.id === s.runway) ?? this.layout.runways[0]; }
   private stand(s: Schedule) { return this.layout.stands.find(x => x.id === s.stand) ?? this.layout.stands[0]; }
-  private altitude(id: string) { return 9 + (this.layout.slot.get(id) ?? 0) * 2.4; }
+  private altitude(id: string) { return 12 + (this.layout.slot.get(id) ?? 0) * 8; }
   private entryAngle(id: string) { const d = this.layout.inbound.get(id) ?? V(-1, 0, 0); return Math.atan2(d.z, d.x); }
   holdPoint(id: string, minutes: number, out = new THREE.Vector3()) {
     const a = this.entryAngle(id) + minutes * HOLD_RATE;
